@@ -318,6 +318,12 @@ def _boss_damage(rod_type: str, rod_level: int) -> int:
     return max(1, base)
 
 
+intents = discord.Intents.default()
+intents.message_content = True
+
+bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
+
+
 def _parse_bet(s: str | None) -> int | None:
     if not s:
         return None
@@ -452,11 +458,6 @@ async def casino_stats_cmd(ctx: commands.Context):
         f"- 마지막 게임: **{last_game}**",
         mention_author=False,
     )
-
-intents = discord.Intents.default()
-intents.message_content = True
-
-bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
 
 def _env_int(name: str) -> int | None:
