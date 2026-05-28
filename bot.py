@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Dict, Tuple
 
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
 from fishing_data import (
@@ -53,6 +53,7 @@ CASINO_COOLDOWN_PATH = DATA_DIR / "casino_cooldown.json"
 CASINO_STATS_PATH = DATA_DIR / "casino_stats.json"
 JACKPOT_PATH = DATA_DIR / "jackpot.json"
 JACKPOT_HISTORY_PATH = DATA_DIR / "jackpot_history.json"
+AUTO_PATH = DATA_DIR / "auto_fish.json"
 
 
 def _default_money() -> Dict[str, int]:
@@ -95,6 +96,9 @@ def _default_jackpot() -> dict:
 
 def _default_jackpot_history() -> dict:
     return {"hits": []}
+
+def _default_auto() -> dict:
+    return {"users": {}}  # user_id(str) -> {enabled: bool, channel_id: int, paid: bool}
 
 
 FISH_BY_ID = {f.id: f for f in FISH_TABLE}
@@ -309,19 +313,108 @@ def _rod_cooldown_seconds(rod_type: str, rod_level: int) -> int:
     return max(3, base)
 
 
-def _boss_damage(rod_type: str, rod_level: int) -> int:
+def _boss_damage(rod_type: str, rod_level: int) -> tuple[int, bool, float]:
     base = random.randint(250, 550) + rod_level * random.randint(30, 55)
     passive = (RODS.get(rod_type) or RODS["rookie"])["passive"]
     if passive.get("type") == "boss_bonus":
         v = float(passive.get("value", 0.0))
         base = int(base * (1.0 + v))
-    return max(1, base)
+
+    # 크리: 기본 7%, 강화레벨 10당 +1% (최대 15%)
+    crit_rate = min(0.15, 0.07 + (rod_level // 10) * 0.01)
+    crit_mult = 1.75
+    is_crit = random.random() < crit_rate
+    dmg = int(base * (crit_mult if is_crit else 1.0))
+    return max(1, dmg), is_crit, crit_mult
 
 
 intents = discord.Intents.default()
 intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
+
+
+async def _auto_enabled_users() -> dict:
+    return await read_json(AUTO_PATH, _default_auto())
+
+
+async def _set_auto_user(user_id: int, *, enabled: bool, channel_id: int, paid: bool | None = None) -> None:
+    def mut(d):
+        d = dict(d or {})
+        d.setdefault("users", {})
+        users = dict(d.get("users") or {})
+        cur = dict(users.get(str(user_id)) or {})
+        cur["enabled"] = bool(enabled)
+        cur["channel_id"] = int(channel_id)
+        if paid is not None:
+            cur["paid"] = bool(paid)
+        users[str(user_id)] = cur
+        d["users"] = users
+        return d
+
+    await update_json(AUTO_PATH, _default_auto(), mut)
+
+
+async def _get_auto_user(user_id: int) -> dict:
+    d = await read_json(AUTO_PATH, _default_auto())
+    users = (d or {}).get("users") or {}
+    return dict(users.get(str(user_id)) or {})
+
+
+def _auto_allowed(rod_level: int, paid: bool) -> bool:
+    return rod_level >= 7 or paid
+
+
+@tasks.loop(seconds=5)
+async def auto_fish_loop():
+    d = await _auto_enabled_users()
+    users = (d or {}).get("users") or {}
+    if not isinstance(users, dict) or not users:
+        return
+
+    now = utc_ts()
+    for uid_str, info in list(users.items()):
+        try:
+            user_id = int(uid_str)
+        except Exception:
+            continue
+        if not isinstance(info, dict) or not info.get("enabled"):
+            continue
+
+        channel_id = info.get("channel_id")
+        if not channel_id:
+            continue
+        channel = bot.get_channel(int(channel_id))
+        if not channel:
+            continue
+
+        rod_type, rod_level = await get_rod(user_id)
+        paid = bool(info.get("paid", False))
+        if not _auto_allowed(rod_level, paid):
+            await _set_auto_user(user_id, enabled=False, channel_id=int(channel_id))
+            try:
+                await channel.send(f"<@{user_id}> 자동낚시가 꺼졌어. 조건: **+7 이상** 또는 **50,000원 구매**")
+            except Exception:
+                pass
+            continue
+
+        cd_seconds = _rod_cooldown_seconds(rod_type, rod_level)
+        last = await get_last_fish_ts(user_id)
+        if (last + cd_seconds) > now:
+            continue
+
+        weights = get_rarity_weights(rod_level, rod_type)
+        rarity = choose_rarity(weights)
+        fish = choose_fish(rarity)
+
+        await set_last_fish_ts(user_id, now)
+        await add_fish(user_id, fish.id, 1)
+        await bump_stats(user_id, fish.rarity)
+
+        try:
+            await channel.send(f"🤖🎣 <@{user_id}> 자동낚시\n{format_fish_catch(fish)}")
+        except Exception:
+            pass
 
 
 def _parse_bet(s: str | None) -> int | None:
@@ -481,6 +574,8 @@ def _channel_allowed(ctx: commands.Context) -> bool:
 async def on_ready():
     ensure_dir(DATA_DIR)
     print(f"Logged in as {bot.user} (id={bot.user.id})")
+    if not auto_fish_loop.is_running():
+        auto_fish_loop.start()
     ch_id = _env_int("ANNOUNCE_CHANNEL_ID")
     if ch_id:
         ch = bot.get_channel(ch_id)
@@ -508,6 +603,7 @@ async def help_cmd(ctx: commands.Context):
         "- `!낚시대랭킹` 낚시대 랭킹 TOP 10\n"
         "- `!보스` 보스 상태/스폰(하루 1회)\n"
         "- `!보스공격` 보스에게 공격\n"
+        "- `!자동낚시` 자동낚시 ON/OFF\n"
         "\n"
         "**카지노**\n"
         "- `!슬롯 <베팅>` 슬롯머신\n"
@@ -605,6 +701,53 @@ async def fish_cmd(ctx: commands.Context):
 
     await ctx.reply(
         f"**{ctx.author.display_name}** 낚시 성공!\n{format_fish_catch(fish)}",
+        mention_author=False,
+    )
+
+
+@bot.command(name="자동낚시")
+async def auto_fish_cmd(ctx: commands.Context):
+    if not _channel_allowed(ctx):
+        return
+
+    user_id = ctx.author.id
+    st = await _get_auto_user(user_id)
+    enabled = bool(st.get("enabled", False))
+    paid = bool(st.get("paid", False))
+    rod_type, rod_level = await get_rod(user_id)
+
+    if enabled:
+        await _set_auto_user(user_id, enabled=False, channel_id=ctx.channel.id)
+        await ctx.reply("자동낚시 OFF", mention_author=False)
+        return
+
+    if not _auto_allowed(rod_level, paid):
+        price = 50_000
+        money = await get_money(user_id)
+        if money >= price:
+            await add_money(user_id, -price)
+            paid = True
+            await _set_auto_user(user_id, enabled=True, channel_id=ctx.channel.id, paid=True)
+            await ctx.reply(
+                f"자동낚시 ON (구매 완료: **{_fmt_money(price)}**)\n"
+                f"- 조건: +7 미만이면 50,000원 구매 필요\n"
+                f"- 현재 낚시대: **{format_rod_name(rod_type, rod_level)}**",
+                mention_author=False,
+            )
+            return
+
+        await ctx.reply(
+            "자동낚시는 조건이 있어.\n"
+            f"- 조건: **낚시대 +7 이상** 또는 **{_fmt_money(price)}** 구매\n"
+            f"- 현재 낚시대: **{format_rod_name(rod_type, rod_level)}**\n"
+            f"- 보유금: **{_fmt_money(money)}**",
+            mention_author=False,
+        )
+        return
+
+    await _set_auto_user(user_id, enabled=True, channel_id=ctx.channel.id)
+    await ctx.reply(
+        f"자동낚시 ON\n- 채널: <#{ctx.channel.id}>\n- 낚시대: **{format_rod_name(rod_type, rod_level)}**",
         mention_author=False,
     )
 
@@ -1141,7 +1284,8 @@ async def boss_attack_cmd(ctx: commands.Context):
         return
 
     rod_type, rod_level = await get_rod(ctx.author.id)
-    dmg = _boss_damage(rod_type, rod_level)
+    dmg, is_crit, crit_mult = _boss_damage(rod_type, rod_level)
+    crit_txt = f" 💥크리티컬! (x{crit_mult:g})" if is_crit else ""
 
     def mut(s):
         s = dict(s or {})
@@ -1163,12 +1307,12 @@ async def boss_attack_cmd(ctx: commands.Context):
 
     if hp > 0:
         await ctx.reply(
-            f"**{ctx.author.display_name}**의 공격! 피해 **{dmg:,}**\n- 보스 HP: **{hp:,}/{mx:,}**",
+            f"**{ctx.author.display_name}**의 공격! 피해 **{dmg:,}**{crit_txt}\n- 보스 HP: **{hp:,}/{mx:,}**",
             mention_author=False,
         )
         return
 
-    await ctx.send(f"**{ctx.author.display_name}**의 막타로 보스가 쓰러졌다! (피해 {dmg:,})")
+    await ctx.send(f"**{ctx.author.display_name}**의 막타로 보스가 쓰러졌다! (피해 {dmg:,}){crit_txt}")
     await _boss_payout(ctx, state)
 
 
