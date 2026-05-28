@@ -196,14 +196,41 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
 
+def _env_int(name: str) -> int | None:
+    v = os.getenv(name)
+    if not v:
+        return None
+    try:
+        return int(v.strip())
+    except Exception:
+        return None
+
+
+def _channel_allowed(ctx: commands.Context) -> bool:
+    allowed = _env_int("COMMAND_CHANNEL_ID")
+    if not allowed:
+        return True
+    return getattr(ctx.channel, "id", None) == allowed
+
+
 @bot.event
 async def on_ready():
     ensure_dir(DATA_DIR)
     print(f"Logged in as {bot.user} (id={bot.user.id})")
+    ch_id = _env_int("ANNOUNCE_CHANNEL_ID")
+    if ch_id:
+        ch = bot.get_channel(ch_id)
+        if ch:
+            try:
+                await ch.send("낚시 RPG 봇 온라인!")
+            except Exception:
+                pass
 
 
 @bot.command(name="도움말")
 async def help_cmd(ctx: commands.Context):
+    if not _channel_allowed(ctx):
+        return
     msg = (
         "**낚시 RPG 봇 명령어**\n"
         "- `!낚시` 낚시하기(쿨타임 있음)\n"
@@ -222,6 +249,8 @@ async def help_cmd(ctx: commands.Context):
 
 @bot.command(name="낚시대")
 async def rod_cmd(ctx: commands.Context):
+    if not _channel_allowed(ctx):
+        return
     rod_type, level = await get_rod(ctx.author.id)
     cd = _rod_cooldown_seconds(rod_type, level)
     await ctx.reply(
@@ -234,6 +263,8 @@ async def rod_cmd(ctx: commands.Context):
 
 @bot.command(name="상점")
 async def shop_cmd(ctx: commands.Context):
+    if not _channel_allowed(ctx):
+        return
     lines = ["**낚시대 상점** (구매: `!구매 <rod_id>`)\n"]
     for rod_id, info in RODS.items():
         price = int(info.get("price", 0))
@@ -243,6 +274,8 @@ async def shop_cmd(ctx: commands.Context):
 
 @bot.command(name="구매")
 async def buy_cmd(ctx: commands.Context, rod_id: str | None = None):
+    if not _channel_allowed(ctx):
+        return
     if not rod_id:
         await ctx.reply("사용법: `!구매 <rod_id>`  (예: `!구매 flame`)", mention_author=False)
         return
@@ -275,6 +308,8 @@ async def buy_cmd(ctx: commands.Context, rod_id: str | None = None):
 
 @bot.command(name="낚시")
 async def fish_cmd(ctx: commands.Context):
+    if not _channel_allowed(ctx):
+        return
     user_id = ctx.author.id
     rod_type, rod_level = await get_rod(user_id)
     cd_seconds = _rod_cooldown_seconds(rod_type, rod_level)
@@ -302,6 +337,8 @@ async def fish_cmd(ctx: commands.Context):
 
 @bot.command(name="인벤")
 async def inv_cmd(ctx: commands.Context):
+    if not _channel_allowed(ctx):
+        return
     inv = await get_inventory(ctx.author.id)
     if not inv:
         await ctx.reply("인벤토리가 비었어. `!낚시`로 시작해봐.", mention_author=False)
@@ -324,6 +361,8 @@ async def inv_cmd(ctx: commands.Context):
 
 @bot.command(name="판매")
 async def sell_cmd(ctx: commands.Context, *, target: str | None = None):
+    if not _channel_allowed(ctx):
+        return
     if not target:
         await ctx.reply("사용법: `!판매 <물고기이름|all>`", mention_author=False)
         return
@@ -374,6 +413,8 @@ async def sell_cmd(ctx: commands.Context, *, target: str | None = None):
 
 @bot.command(name="강화")
 async def upgrade_cmd(ctx: commands.Context):
+    if not _channel_allowed(ctx):
+        return
     rod_type, level = await get_rod(ctx.author.id)
     cost = upgrade_cost(level)
     rate = upgrade_success_rate(level)
@@ -405,6 +446,8 @@ async def upgrade_cmd(ctx: commands.Context):
 
 @bot.command(name="랭킹")
 async def ranking_cmd(ctx: commands.Context):
+    if not _channel_allowed(ctx):
+        return
     money = await read_json(MONEY_PATH, _default_money())
     items = []
     for uid, m in (money or {}).items():
@@ -440,6 +483,8 @@ def _boss_alive(state: dict, now: int) -> bool:
 
 @bot.command(name="보스")
 async def boss_cmd(ctx: commands.Context):
+    if not _channel_allowed(ctx):
+        return
     now = utc_ts()
     state = await _get_boss_state()
 
@@ -515,6 +560,8 @@ async def _boss_payout(ctx: commands.Context, state: dict) -> None:
 
 @bot.command(name="보스공격")
 async def boss_attack_cmd(ctx: commands.Context):
+    if not _channel_allowed(ctx):
+        return
     now = utc_ts()
     state = await _get_boss_state()
     if not _boss_alive(state, now):

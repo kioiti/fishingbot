@@ -25,10 +25,18 @@ pip install -r requirements.txt
 
 ## 설정(.env)
 
-`.env.example`을 복사해서 `.env`를 만들고 토큰을 넣어주세요.
+`.env.example`을 복사해서 `.env`를 만들고 토큰을 넣어주세요. (원하면 채널 ID도 설정 가능)
 
 ```bash
 copy .env.example .env
+```
+
+`.env` 예시:
+
+```env
+DISCORD_TOKEN=...
+COMMAND_CHANNEL_ID=123456789012345678
+ANNOUNCE_CHANNEL_ID=123456789012345678
 ```
 
 ## 실행
