@@ -108,11 +108,167 @@ RODS: Dict[str, dict] = {
 }
 
 
+MAPS: Dict[str, dict] = {
+    "river": {
+        "name": "🌳 초보의 강",
+        "req_level": 0,
+        "fee": 0,
+        "cooldown_multiplier": 1.0,
+        "rarity_weights": {
+            "common": 0.82,
+            "rare": 0.14,
+            "epic": 0.04,
+            "legendary": 0.00,
+            "mythic": 0.00,
+        }
+    },
+    "ocean": {
+        "name": "🌊 깊은 바다",
+        "req_level": 5,
+        "fee": 10000,
+        "cooldown_multiplier": 1.0,
+        "rarity_weights": {
+            "common": 0.60,
+            "rare": 0.28,
+            "epic": 0.10,
+            "legendary": 0.017,
+            "mythic": 0.003,
+        }
+    },
+    "abyss": {
+        "name": "🌋 심해의 구렁",
+        "req_level": 10,
+        "fee": 30000,
+        "cooldown_multiplier": 1.2,
+        "rarity_weights": {
+            "common": 0.35,
+            "rare": 0.38,
+            "epic": 0.20,
+            "legendary": 0.05,
+            "mythic": 0.02,
+        }
+    },
+    "cosmic": {
+        "name": "🌌 코스믹 오션",
+        "req_level": 15,
+        "fee": 100000,
+        "cooldown_multiplier": 1.5,
+        "rarity_weights": {
+            "common": 0.10,
+            "rare": 0.25,
+            "epic": 0.38,
+            "legendary": 0.19,
+            "mythic": 0.08,
+        }
+    }
+}
+
+
+ITEMS: Dict[str, dict] = {
+    "bait_worm": {
+        "name": "🐛 일반 지렁이",
+        "price": 500,
+        "desc": "쿨타임을 15% 단축시켜 줍니다. (낚시 1회당 1개 소모)",
+        "type": "bait",
+        "effect_type": "cooldown",
+        "effect_value": 0.15
+    },
+    "bait_shrimp": {
+        "name": "🦐 크릴새우",
+        "price": 2000,
+        "desc": "영웅 이상 물고기 확률을 보정해 줍니다. (낚시 1회당 1개 소모)",
+        "type": "bait",
+        "effect_type": "rarity_mid",
+        "effect_value": 0.25
+    },
+    "bait_gold": {
+        "name": "🌟 황금 미끼",
+        "price": 10000,
+        "desc": "전설/신화 물고기 확률을 보정해 줍니다. (낚시 1회당 1개 소모)",
+        "type": "bait",
+        "effect_type": "rarity_high",
+        "effect_value": 0.50
+    },
+    "scroll_protect": {
+        "name": "📜 강화 보호 주문서",
+        "price": 100000,
+        "desc": "+10강 이상에서 강화 실패 시 레벨 하락을 100% 방어해 줍니다. (자동 소모)",
+        "type": "scroll",
+        "effect_type": "protect",
+        "effect_value": 0.0
+    }
+}
+
+
+BOSS_ROTATION: Dict[int, dict] = {
+    0: {
+        "name": "🐙 대왕 크라켄",
+        "hp_mult": 1.2,
+        "base_reward": 150000,
+        "drop_item": "scroll_protect",
+        "drop_rate": 0.25,
+        "desc": "거대한 다리로 배를 습격하는 심해의 군주입니다."
+    },
+    1: {
+        "name": "👻 유령 더블룬선",
+        "hp_mult": 1.0,
+        "base_reward": 120000,
+        "drop_item": "bait_gold",
+        "drop_rate": 0.40,
+        "desc": "바다 밑을 표류하는 고대 황금 해적선입니다."
+    },
+    2: {
+        "name": "🌋 고대 용암 게",
+        "hp_mult": 1.5,
+        "base_reward": 180000,
+        "drop_item": "scroll_protect",
+        "drop_rate": 0.35,
+        "desc": "심해 화산지대에서 서식하는 거대한 등껍질의 갑각류입니다."
+    },
+    3: {
+        "name": "⚡ 전기 해파리 퀸",
+        "hp_mult": 1.1,
+        "base_reward": 130000,
+        "drop_item": "bait_gold",
+        "drop_rate": 0.30,
+        "desc": "수만 볼트의 전류를 내뿜는 심해의 발광 생명체입니다."
+    },
+    4: {
+        "name": "🐉 심해룡 레비아탄",
+        "hp_mult": 2.0,
+        "base_reward": 250000,
+        "drop_item": "scroll_protect",
+        "drop_rate": 0.60,
+        "desc": "바다 전체를 뒤흔드는 고대 신화 속의 거대 용입니다."
+    },
+    5: {
+        "name": "🌌 코스믹 가디언",
+        "hp_mult": 2.5,
+        "base_reward": 300000,
+        "drop_item": "scroll_protect",
+        "drop_rate": 0.80,
+        "desc": "우주의 기운을 머금고 심해 속 차원문을 지키는 차원의 수호자입니다."
+    },
+    6: {
+        "name": "👑 바다신 포세이돈의 환영",
+        "hp_mult": 3.0,
+        "base_reward": 400000,
+        "drop_item": "scroll_protect",
+        "drop_rate": 1.0,
+        "desc": "바다신의 신성한 영혼이 실체화된 분노의 환영입니다."
+    }
+}
+
+
 def clamp(n: float, a: float, b: float) -> float:
     return max(a, min(b, n))
 
 
 def get_base_cooldown_seconds(rod_level: int) -> int:
+    if rod_level >= 25:
+        return 3
+    if rod_level >= 20:
+        return 4
     if rod_level >= 15:
         return 6
     if rod_level >= 10:
@@ -123,6 +279,10 @@ def get_base_cooldown_seconds(rod_level: int) -> int:
 
 
 def get_legendary_bonus_by_level(rod_level: int) -> float:
+    if rod_level >= 25:
+        return 0.089
+    if rod_level >= 20:
+        return 0.059
     if rod_level >= 15:
         return 0.029
     if rod_level >= 10:
@@ -130,18 +290,13 @@ def get_legendary_bonus_by_level(rod_level: int) -> float:
     return 0.000
 
 
-def get_rarity_weights(rod_level: int, rod_type: str) -> Dict[str, float]:
-    base = {
-        "common": 0.78,
-        "rare": 0.17,
-        "epic": 0.045,
-        "legendary": 0.004,
-        "mythic": 0.001,
-    }
+def get_rarity_weights(rod_level: int, rod_type: str, map_id: str = "river", active_bait: str | None = None) -> Dict[str, float]:
+    m = MAPS.get(map_id) or MAPS["river"]
+    base = dict(m["rarity_weights"])
 
     bonus_leg = get_legendary_bonus_by_level(rod_level)
     if bonus_leg > 0:
-        steal_from_common = clamp(bonus_leg * 1.2, 0.0, base["common"] - 0.40)
+        steal_from_common = clamp(bonus_leg * 1.2, 0.0, base["common"] - 0.05)
         base["common"] -= steal_from_common
         base["legendary"] += bonus_leg
         base["epic"] += (steal_from_common - bonus_leg) * 0.55
@@ -150,12 +305,26 @@ def get_rarity_weights(rod_level: int, rod_type: str) -> Dict[str, float]:
     passive = (RODS.get(rod_type) or RODS["rookie"])["passive"]
     if passive.get("type") == "rarity_bonus":
         boost = float(passive.get("value", 0.0))
-        take = clamp(base["common"] * boost, 0.0, base["common"] - 0.35)
+        take = clamp(base["common"] * boost, 0.0, base["common"] - 0.05)
         base["common"] -= take
         base["rare"] += take * 0.55
         base["epic"] += take * 0.30
         base["legendary"] += take * 0.13
         base["mythic"] += take * 0.02
+
+    if active_bait:
+        if active_bait == "bait_shrimp":
+            boost = 0.25
+            take = clamp(base["common"] * boost, 0.0, base["common"] - 0.05)
+            base["common"] -= take
+            base["rare"] += take * 0.60
+            base["epic"] += take * 0.40
+        elif active_bait == "bait_gold":
+            boost = 0.50
+            take = clamp(base["common"] * boost, 0.0, base["common"] - 0.05)
+            base["common"] -= take
+            base["legendary"] += take * 0.70
+            base["mythic"] += take * 0.30
 
     s = sum(base.values())
     for k in list(base.keys()):
@@ -205,7 +374,18 @@ def upgrade_success_rate(rod_level: int) -> float:
         return 0.35
     if rod_level < 20:
         return 0.18
-    return 0.10
+    if rod_level < 25:
+        return 0.08
+    return 0.03
+
+
+def upgrade_penalty_check(rod_level: int) -> bool:
+    """강화 실패 시 등급이 하락할지 여부를 판환합니다. (+10강 이상)"""
+    if rod_level >= 15:
+        return random.random() < 0.45
+    if rod_level >= 10:
+        return random.random() < 0.25
+    return False
 
 
 def upgrade_try(rod_level: int) -> Tuple[bool, int]:
@@ -228,7 +408,7 @@ def boss_default_state() -> dict:
     }
 
 
-def boss_spawn(max_hp: int, now_ts: int, duration_seconds: int) -> dict:
+def boss_spawn(max_hp: int, now_ts: int, duration_seconds: int, name: str = "심해의 거대어") -> dict:
     s = boss_default_state()
     s["active"] = True
     s["hp"] = max_hp
@@ -237,5 +417,6 @@ def boss_spawn(max_hp: int, now_ts: int, duration_seconds: int) -> dict:
     s["ends_at"] = now_ts + duration_seconds
     s["contributors"] = {}
     s["last_hit"] = None
+    s["name"] = name
     return s
 
