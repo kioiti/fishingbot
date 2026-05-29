@@ -1973,7 +1973,7 @@ async def slot10_cmd(ctx: commands.Context, bet_raw: str | None = None):
     await add_money(ctx.author.id, -needed)
     pot_after_add = await _jackpot_add(int(needed * SLOT_JACKPOT_RATE))
 
-    total_net = -needed
+    total_net = 0
     hits = 0
     jackpots = 0
     best_body = ""
@@ -1986,7 +1986,7 @@ async def slot10_cmd(ctx: commands.Context, bet_raw: str | None = None):
         )
         total_win += win
         spin_net = win - bet
-        total_net += spin_net
+        total_net += spin_net  # 회차별 순이익 합 = 총 획득 - 총 베팅(선결제는 별도)
         if spin_net > 0:
             hits += 1
         if "잭팟" in body:
@@ -1999,13 +1999,15 @@ async def slot10_cmd(ctx: commands.Context, bet_raw: str | None = None):
     await _casino_bump(ctx.author.id, needed, total_net, "슬롯10")
     bal = await get_money(ctx.author.id)
 
+    net_sign = "+" if total_net >= 0 else ""
     extra = f"\n💥 잭팟 {jackpots}회!" if jackpots else ""
     await ctx.reply(
         f"🎰 **슬롯 10연속 결과**\n"
         f"- 적중: **{hits}/10**\n"
         f"- 베스트: {best_body or '(없음)'}\n"
-        f"- 순수익: **{_fmt_money(total_net)}**\n"
-        f"- 잭팟: **{_fmt_money(pot_after_add)}** / 잔액: **{_fmt_money(bal)}**{extra}",
+        f"- 총 베팅: **{_fmt_money(needed)}** / 총 획득: **{_fmt_money(total_win)}**\n"
+        f"- 순수익: **{net_sign}{_fmt_money(total_net)}** (잔액 변동과 동일)\n"
+        f"- 잭팟 적립: **{_fmt_money(pot_after_add)}** / 잔액: **{_fmt_money(bal)}**{extra}",
         mention_author=False,
     )
 
