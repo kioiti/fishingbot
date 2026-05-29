@@ -86,6 +86,16 @@ from game_fun import (
     streak_extra_reward,
     tournament_weekend_key,
 )
+from game_stocks import (
+    STOCKS,
+    STOCK_TICK_SECONDS,
+    MAX_TRADE_QTY,
+    default_market,
+    format_change,
+    resolve_stock,
+    stock_line,
+    tick_market,
+)
 
 
 ROOT = Path(__file__).resolve().parent
@@ -101,6 +111,7 @@ USER_MAP = {
     435351384137662464: "지성콩",
     1004779456696688760: "미희여사",
     706114030061879296: "에빙",
+    552137320963244074: "쮼콩",
 }
 
 MONEY_PATH = DATA_DIR / "money.json"
@@ -124,6 +135,8 @@ WEATHER_PATH = DATA_DIR / "weather.json"
 MERCHANT_PATH = DATA_DIR / "merchant.json"
 PET_PATH = DATA_DIR / "pets.json"
 FUN_PATH = DATA_DIR / "fun.json"
+STOCK_MARKET_PATH = DATA_DIR / "stock_market.json"
+STOCK_PORTFOLIO_PATH = DATA_DIR / "stock_portfolio.json"
 
 QUIZ_PENDING: Dict[int, dict] = {}
 
@@ -686,6 +699,14 @@ def _auto_allowed(rod_level: int, paid: bool) -> bool:
     return rod_level >= 7 or paid
 
 
+@tasks.loop(seconds=STOCK_TICK_SECONDS)
+async def stock_market_loop():
+    try:
+        await _tick_stock_market()
+    except Exception:
+        pass
+
+
 @tasks.loop(seconds=300)
 async def weather_refresh_loop():
     try:
@@ -1228,6 +1249,9 @@ async def on_ready():
         auto_fish_loop.start()
     if not weather_refresh_loop.is_running():
         weather_refresh_loop.start()
+    if not stock_market_loop.is_running():
+        stock_market_loop.start()
+    await _ensure_stock_market()
     ch_id = _env_int("ANNOUNCE_CHANNEL_ID")
     if ch_id:
         ch = bot.get_channel(ch_id)
@@ -1313,6 +1337,13 @@ async def help_cmd(ctx: commands.Context):
         "- `!스크래치 <베팅>` 복권 긁기\n"
         "- `!로켓 <베팅> <배율>` 로켓 멀티\n"
         "- `!대출 <금액>` / `!상환` (이자 10%)\n"
+        "\n"
+        "**📈 주식 (낚시 수입으로 투자)**\n"
+        "- `!주식목록` 시세·등락률 보기\n"
+        "- `!주식매수 <종목> <수량>` 매수 (닉/회사명/티커)\n"
+        "- `!주식매도 <종목> <수량>` 매도\n"
+        "- `!주식보유` 내 보유 주식·평가액\n"
+        "- `!주식시세 <종목>` 종목 상세\n"
     )
     await ctx.reply(msg, mention_author=False)
 
@@ -3802,6 +3833,260 @@ async def fish_quiz_answer_cmd(ctx: commands.Context, num_raw: str | None = None
         )
 
 
+def _default_stock_portfolio() -> Dict[str, dict]:
+    return {}
+
+
+async def _ensure_stock_market() -> dict:
+    m = await read_json(STOCK_MARKET_PATH, default_market())
+    if not m.get("prices") or len(m.get("prices", {})) < len(STOCKS):
+        m = default_market()
+        m["last_tick"] = utc_ts()
+        await write_json(STOCK_MARKET_PATH, m)
+    return m
+
+
+async def _get_stock_market() -> dict:
+    return await _ensure_stock_market()
+
+
+async def _tick_stock_market() -> None:
+    m = await _get_stock_market()
+    prices = dict(m.get("prices") or {})
+    prev = dict(m.get("prev") or prices)
+    new_prices, new_prev = tick_market(prices, prev)
+    await write_json(
+        STOCK_MARKET_PATH,
+        {
+            "prices": new_prices,
+            "prev": new_prev,
+            "last_tick": utc_ts(),
+        },
+    )
+
+
+async def _get_user_portfolio(user_id: int) -> Dict[str, int]:
+    all_p = await read_json(STOCK_PORTFOLIO_PATH, _default_stock_portfolio())
+    raw = dict((all_p or {}).get(str(user_id)) or {})
+    out: Dict[str, int] = {}
+    for k, v in raw.items():
+        try:
+            q = int(v)
+            if q > 0:
+                out[str(k)] = q
+        except Exception:
+            continue
+    return out
+
+
+async def _set_user_portfolio(user_id: int, holdings: Dict[str, int]) -> None:
+    def mut(d):
+        d = dict(d or {})
+        cleaned = {k: int(v) for k, v in holdings.items() if int(v) > 0}
+        if cleaned:
+            d[str(user_id)] = cleaned
+        else:
+            d.pop(str(user_id), None)
+        return d
+
+    await update_json(STOCK_PORTFOLIO_PATH, _default_stock_portfolio(), mut)
+
+
+def _stock_price(market: dict, stock_id: str) -> tuple[int, int]:
+    prices = market.get("prices") or {}
+    prev = market.get("prev") or {}
+    cur = int(prices.get(stock_id, STOCKS[stock_id]["base_price"]))
+    old = int(prev.get(stock_id, cur))
+    return cur, old
+
+
+@bot.command(name="주식목록", aliases=["주식"])
+async def stock_list_cmd(ctx: commands.Context):
+    if not _channel_allowed(ctx):
+        return
+    market = await _get_stock_market()
+    lines = [
+        f"**📈 콩 주식거래소** (시세 **{STOCK_TICK_SECONDS // 60}분**마다 변동)\n"
+    ]
+    for sid in STOCKS:
+        cur, prev = _stock_price(market, sid)
+        lines.append(stock_line(sid, cur, prev))
+    lines.append(
+        "\n💡 예: `!주식매수 머래제약 5` · `!주식매도 MRRX 2` · `!주식보유`"
+    )
+    await ctx.reply("\n".join(lines), mention_author=False)
+
+
+@bot.command(name="주식시세")
+async def stock_quote_cmd(ctx: commands.Context, *, query: str | None = None):
+    if not _channel_allowed(ctx):
+        return
+    if not query:
+        await ctx.reply(
+            "사용법: `!주식시세 <종목>` (예: `!주식시세 머래제약` · `!주식시세 EVNG`)",
+            mention_author=False,
+        )
+        return
+    sid = resolve_stock(query.split()[0] if query else "")
+    if not sid:
+        await ctx.reply("종목을 찾을 수 없어. `!주식목록`을 확인해줘.", mention_author=False)
+        return
+    market = await _get_stock_market()
+    cur, prev = _stock_price(market, sid)
+    s = STOCKS[sid]
+    holdings = await _get_user_portfolio(ctx.author.id)
+    my_qty = int(holdings.get(sid, 0))
+    val = cur * my_qty
+    await ctx.reply(
+        f"**{s['company']}** (`{s['ticker']}`)\n"
+        f"- 대표 브랜드: **{s['nick']}**\n"
+        f"- 현재가: **{cur:,}원**/주 {format_change(cur, prev)}\n"
+        f"- 직전가: **{prev:,}원**\n"
+        f"- 기준가(참고): **{int(s['base_price']):,}원**\n"
+        f"- 내 보유: **{my_qty}주** (평가 **{_fmt_money(val)}**)",
+        mention_author=False,
+    )
+
+
+@bot.command(name="주식매수")
+async def stock_buy_cmd(ctx: commands.Context, query: str | None = None, qty_raw: str | None = None):
+    if not _channel_allowed(ctx):
+        return
+    if not query or not qty_raw:
+        await ctx.reply(
+            "사용법: `!주식매수 <종목> <수량>`\n"
+            "예: `!주식매수 머래제약 10` · `!주식매수 밈콩 3`",
+            mention_author=False,
+        )
+        return
+    sid = resolve_stock(query)
+    if not sid:
+        await ctx.reply("종목을 찾을 수 없어. `!주식목록` 참고!", mention_author=False)
+        return
+    if not qty_raw.isdigit():
+        await ctx.reply("수량은 숫자로 입력해줘.", mention_author=False)
+        return
+    qty = int(qty_raw)
+    if qty <= 0 or qty > MAX_TRADE_QTY:
+        await ctx.reply(f"수량은 1~{MAX_TRADE_QTY}주까지 가능해.", mention_author=False)
+        return
+
+    market = await _get_stock_market()
+    price, _ = _stock_price(market, sid)
+    total = price * qty
+    money = await get_money(ctx.author.id)
+    if money < total:
+        await ctx.reply(
+            f"돈이 부족해!\n"
+            f"- 필요: **{_fmt_money(total)}** ({price:,}원 x {qty}주)\n"
+            f"- 보유: **{_fmt_money(money)}**",
+            mention_author=False,
+        )
+        return
+
+    await add_money(ctx.author.id, -total)
+    port = await _get_user_portfolio(ctx.author.id)
+    port[sid] = int(port.get(sid, 0)) + qty
+    await _set_user_portfolio(ctx.author.id, port)
+    bal = await get_money(ctx.author.id)
+    s = STOCKS[sid]
+    await ctx.reply(
+        f"✅ **매수 체결**\n"
+        f"- 종목: **{s['company']}** (`{s['ticker']}`)\n"
+        f"- 체결: **{price:,}원** x **{qty}주** = **{_fmt_money(total)}**\n"
+        f"- 보유: **{port[sid]}주** / 잔액: **{_fmt_money(bal)}**",
+        mention_author=False,
+    )
+
+
+@bot.command(name="주식매도")
+async def stock_sell_cmd(ctx: commands.Context, query: str | None = None, qty_raw: str | None = None):
+    if not _channel_allowed(ctx):
+        return
+    if not query or not qty_raw:
+        await ctx.reply(
+            "사용법: `!주식매도 <종목> <수량>`\n"
+            "예: `!주식매도 MRRX 5` · `!주식매도 에빙전자 all`",
+            mention_author=False,
+        )
+        return
+    sid = resolve_stock(query)
+    if not sid:
+        await ctx.reply("종목을 찾을 수 없어.", mention_author=False)
+        return
+
+    port = await _get_user_portfolio(ctx.author.id)
+    have = int(port.get(sid, 0))
+    if have <= 0:
+        await ctx.reply("그 주식은 보유하고 있지 않아.", mention_author=False)
+        return
+
+    if qty_raw.strip().lower() == "all":
+        qty = have
+    elif qty_raw.isdigit():
+        qty = int(qty_raw)
+    else:
+        await ctx.reply("수량은 숫자 또는 `all`", mention_author=False)
+        return
+
+    if qty <= 0 or qty > MAX_TRADE_QTY:
+        await ctx.reply(f"수량은 1~{MAX_TRADE_QTY}주 (보유 {have}주)", mention_author=False)
+        return
+    if qty > have:
+        await ctx.reply(f"보유 주식이 부족해! (보유 **{have}주**)", mention_author=False)
+        return
+
+    market = await _get_stock_market()
+    price, _ = _stock_price(market, sid)
+    total = price * qty
+    await add_money(ctx.author.id, total)
+    port[sid] = have - qty
+    if port[sid] <= 0:
+        port.pop(sid, None)
+    await _set_user_portfolio(ctx.author.id, port)
+    bal = await get_money(ctx.author.id)
+    s = STOCKS[sid]
+    left = int(port.get(sid, 0))
+    await ctx.reply(
+        f"✅ **매도 체결**\n"
+        f"- 종목: **{s['company']}** (`{s['ticker']}`)\n"
+        f"- 체결: **{price:,}원** x **{qty}주** = **{_fmt_money(total)}**\n"
+        f"- 남은 보유: **{left}주** / 잔액: **{_fmt_money(bal)}**",
+        mention_author=False,
+    )
+
+
+@bot.command(name="주식보유", aliases=["내주식"])
+async def stock_portfolio_cmd(ctx: commands.Context):
+    if not _channel_allowed(ctx):
+        return
+    port = await _get_user_portfolio(ctx.author.id)
+    if not port:
+        await ctx.reply(
+            "보유 주식이 없어. `!주식목록` 보고 `!주식매수`로 사봐!",
+            mention_author=False,
+        )
+        return
+    market = await _get_stock_market()
+    lines = [f"**💼 {ctx.author.display_name}** 주식 포트폴리오\n"]
+    total_val = 0
+    for sid, qty in sorted(port.items(), key=lambda x: -x[1]):
+        if sid not in STOCKS:
+            continue
+        cur, prev = _stock_price(market, sid)
+        val = cur * qty
+        total_val += val
+        s = STOCKS[sid]
+        lines.append(
+            f"- **{s['company']}** `{s['ticker']}` — **{qty}주** "
+            f"@ {cur:,}원 ({format_change(cur, prev)}) → **{_fmt_money(val)}**"
+        )
+    cash = await get_money(ctx.author.id)
+    lines.append(f"\n📊 주식 평가액: **{_fmt_money(total_val)}**")
+    lines.append(f"💰 현금: **{_fmt_money(cash)}** · 총자산(대략): **{_fmt_money(total_val + cash)}**")
+    await ctx.reply("\n".join(lines), mention_author=False)
+
+
 @bot.command(name="이벤트")
 async def events_cmd(ctx: commands.Context):
     if not _channel_allowed(ctx):
@@ -3818,6 +4103,7 @@ async def events_cmd(ctx: commands.Context):
     lines.append("🎡 `!행운판` — 하루 1회 무료")
     lines.append("📅 `!일일` — 연속 출석 보너스")
     lines.append("❓ `!물고기퀴즈` — 5분 쿨타임")
+    lines.append("📈 `!주식목록` — 닉네임 주식 (2분마다 시세 변동)")
     await ctx.reply("\n".join(lines), mention_author=False)
 
 
