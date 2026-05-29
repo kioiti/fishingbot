@@ -15,13 +15,22 @@ from fishing_data import (
     RODS,
     MAPS,
     ITEMS,
+    CHESTS,
     BOSS_ROTATION,
     RARITY_LABEL,
+    RARITY_FLAIR,
     boss_spawn,
     choose_fish,
     choose_rarity,
     format_fish_catch,
+    format_chest_drop,
     format_rod_name,
+    open_chest,
+    rod_passive_text,
+    roll_fishing_catch,
+    spin_slot,
+    SLOT_WIN_FEE,
+    SLOT_JACKPOT_RATE,
     get_base_cooldown_seconds,
     get_rarity_weights,
     upgrade_cost,
@@ -30,6 +39,28 @@ from fishing_data import (
     upgrade_penalty_check,
 )
 from utils.jsondb import ensure_dir, get_user_dict, read_json, update_json, utc_ts, write_json
+from game_extras import (
+    ACHIEVEMENTS,
+    TITLES,
+    CRAFT_RECIPES,
+    DAILY_QUEST_POOL,
+    GACHA_COST,
+    GACHA_POOL,
+    MYSTERY_SHOP_POOL,
+    WEATHER_TYPES,
+    WEEKLY_QUEST,
+    achievement_progress,
+    chest_chance_bonus,
+    generate_mystery_shop,
+    market_mult_today,
+    pick_daily_quest,
+    roll_gacha,
+    roll_weather,
+    shiny_chance,
+    today_key,
+    unlocked_titles,
+    week_key,
+)
 
 
 ROOT = Path(__file__).resolve().parent
@@ -58,9 +89,14 @@ CASINO_STATS_PATH = DATA_DIR / "casino_stats.json"
 JACKPOT_PATH = DATA_DIR / "jackpot.json"
 JACKPOT_HISTORY_PATH = DATA_DIR / "jackpot_history.json"
 AUTO_PATH = DATA_DIR / "auto_fish.json"
+DAILY_PATH = DATA_DIR / "daily.json"
+TREASURE_PATH = DATA_DIR / "treasure.json"
 MAP_PATH = DATA_DIR / "map.json"
 BAIT_PATH = DATA_DIR / "active_bait.json"
 COLLECTION_PATH = DATA_DIR / "collection.json"
+PROFILE_PATH = DATA_DIR / "profile.json"
+WEATHER_PATH = DATA_DIR / "weather.json"
+MERCHANT_PATH = DATA_DIR / "merchant.json"
 
 
 def _default_money() -> Dict[str, int]:
@@ -115,6 +151,45 @@ def _default_bait() -> Dict[str, str]:
 
 def _default_collection() -> Dict[str, list]:
     return {}  # user_id(str) -> list of fish_ids
+
+
+def _default_profile() -> Dict[str, dict]:
+    return {}
+
+
+def _default_weather() -> dict:
+    return {"id": "sunny", "until": 0}
+
+
+def _default_merchant() -> dict:
+    return {"until": 0, "items": []}
+
+
+def _fish_inv_key(fish_id: str, shiny: bool = False) -> str:
+    return f"shiny_{fish_id}" if shiny else fish_id
+
+
+def _inv_item_display(key: str) -> str:
+    if key.startswith("shiny_"):
+        base = key[6:]
+        f = FISH_BY_ID.get(base)
+        return f"✨이색 {f.name}" if f else key
+    f = FISH_BY_ID.get(key)
+    if f:
+        return f.name
+    if key in ITEMS:
+        return ITEMS[key]["name"]
+    if key in CHESTS:
+        return CHESTS[key]["name"]
+    return key
+
+
+def _fish_sell_price(key: str) -> int:
+    if key.startswith("shiny_"):
+        base = FISH_BY_ID.get(key[6:])
+        return int(base.sell * 3) if base else 0
+    f = FISH_BY_ID.get(key)
+    return int(f.sell) if f else 0
 
 
 async def get_user_map(user_id: int) -> str:
@@ -256,12 +331,33 @@ async def consume_active_bait(user_id: int) -> dict | None:
     return {
         "bait_id": bait_id,
         "item_info": ITEMS[bait_id],
-        "exhausted": exhausted
+        "exhausted": exhausted,
+        "remaining": int(new_qty),
     }
+
+
+def _format_wait_time(seconds: int) -> str:
+    seconds = max(0, int(seconds))
+    if seconds >= 60:
+        return f"**{seconds // 60}분 {seconds % 60}초**"
+    return f"**{seconds}초**"
+
+
+def _format_bait_status(bait_consumed: dict | None, had_equipped: bool) -> str:
+    if bait_consumed:
+        name = bait_consumed["item_info"]["name"]
+        left = int(bait_consumed.get("remaining", 0))
+        if bait_consumed.get("exhausted"):
+            return f"\n🪱 **{name}** 1개 소모 → 남은 **0개** (미끼 소진, 장착 해제)"
+        return f"\n🪱 **{name}** 1개 소모 → 남은 **{left}개**"
+    if had_equipped:
+        return "\n⚠️ 장착한 미끼가 없어 효과 없이 낚았어. (자동 장착 해제됨)"
+    return ""
 
 
 FISH_BY_ID = {f.id: f for f in FISH_TABLE}
 FISH_BY_NAME = {f.name: f for f in FISH_TABLE}
+CHEST_IDS = set(CHESTS.keys())
 
 
 def _today_key_utc() -> str:
@@ -406,7 +502,19 @@ async def _casino_bump(user_id: int, bet: int, net: int, game: str) -> dict:
         s["last_game"] = str(game)
         return d
 
-    return await update_json(CASINO_STATS_PATH, _default_casino_stats(), mut)
+    await update_json(CASINO_STATS_PATH, _default_casino_stats(), mut)
+
+    def pm(p):
+        p["casino_plays"] = int(p.get("casino_plays", 0)) + 1
+        if net > 0:
+            p["casino_wins"] = int(p.get("casino_wins", 0)) + 1
+
+    await profile_update(user_id, pm)
+    await quest_bump(user_id, "casino_play", 1)
+    if net > 0:
+        await quest_bump(user_id, "casino_win", 1)
+
+    return {}
 
 
 async def _jackpot_add(delta: int) -> int:
@@ -466,21 +574,39 @@ def _display_name(ctx: commands.Context, user_id: int) -> str:
 def _rod_cooldown_seconds(rod_type: str, rod_level: int) -> int:
     base = get_base_cooldown_seconds(rod_level)
     passive = (RODS.get(rod_type) or RODS["rookie"])["passive"]
-    if passive.get("type") == "cooldown_bonus":
+    ptype = passive.get("type", "none")
+    v = 0.0
+    if ptype == "cooldown_bonus":
         v = float(passive.get("value", 0.0))
+    elif ptype == "combo":
+        v = float(passive.get("cooldown", 0.0))
+    if v > 0:
         base = int(math.ceil(base * (1.0 - v)))
     return max(3, base)
+
+
+def _rod_sell_mult(rod_type: str) -> float:
+    passive = (RODS.get(rod_type) or RODS["rookie"])["passive"]
+    if passive.get("type") == "sell_bonus":
+        return 1.0 + float(passive.get("value", 0.0))
+    return 1.0
 
 
 def _boss_damage(rod_type: str, rod_level: int) -> tuple[int, bool, float]:
     base = random.randint(250, 550) + rod_level * random.randint(30, 55)
     passive = (RODS.get(rod_type) or RODS["rookie"])["passive"]
-    if passive.get("type") == "boss_bonus":
-        v = float(passive.get("value", 0.0))
-        base = int(base * (1.0 + v))
+    ptype = passive.get("type", "none")
+    if ptype == "boss_bonus":
+        base = int(base * (1.0 + float(passive.get("value", 0.0))))
+    elif ptype == "combo" and passive.get("boss"):
+        base = int(base * (1.0 + float(passive["boss"])))
 
-    # 크리: 기본 7%, 강화레벨 10당 +1% (최대 15%)
-    crit_rate = min(0.15, 0.07 + (rod_level // 10) * 0.01)
+    crit_rate = min(0.20, 0.07 + (rod_level // 10) * 0.01)
+    if ptype == "crit_bonus":
+        crit_rate = min(0.25, crit_rate + float(passive.get("value", 0.0)))
+    elif ptype == "combo" and passive.get("crit"):
+        crit_rate = min(0.25, crit_rate + float(passive["crit"]))
+
     crit_mult = 1.75
     is_crit = random.random() < crit_rate
     dmg = int(base * (crit_mult if is_crit else 1.0))
@@ -522,6 +648,15 @@ async def _get_auto_user(user_id: int) -> dict:
 
 def _auto_allowed(rod_level: int, paid: bool) -> bool:
     return rod_level >= 7 or paid
+
+
+@tasks.loop(seconds=300)
+async def weather_refresh_loop():
+    try:
+        wid, until = roll_weather()
+        await write_json(WEATHER_PATH, {"id": wid, "until": until})
+    except Exception:
+        pass
 
 
 @tasks.loop(seconds=5)
@@ -571,38 +706,27 @@ async def auto_fish_loop():
 
         # 2. 미끼 소모
         map_id = await get_user_map(user_id)
+        had_bait_equipped = bool(await get_user_bait(user_id))
         bait_consumed = await consume_active_bait(user_id)
         active_bait_id = bait_consumed["bait_id"] if bait_consumed else None
 
-        # 3. 희귀도 및 물고기 결정
-        weights = get_rarity_weights(rod_level, rod_type, map_id, active_bait_id)
-        rarity = choose_rarity(weights)
-        fish = choose_fish(rarity)
-
-        # 4. 저장 및 통계 갱신
         await set_last_fish_ts(user_id, now)
-        await add_fish(user_id, fish.id, 1)
-        await bump_stats(user_id, fish.rarity)
-        
-        # 도감 등록
-        is_new = await add_to_collection(user_id, fish.id)
+        catch_txt, is_new = await perform_fishing_catch(
+            user_id, rod_type, rod_level, map_id, active_bait_id
+        )
 
-        # 5. 출력 포맷
-        bait_txt = ""
-        if bait_consumed:
-            bait_name = bait_consumed["item_info"]["name"]
-            if bait_consumed["exhausted"]:
-                bait_txt = f"\n(소모: {bait_name} - ⚠️ **미끼를 모두 소모하여 장착 해제되었습니다!**)"
-            else:
-                bait_txt = f"\n(소모: {bait_name})"
-                
+        bait_txt = _format_bait_status(bait_consumed, had_bait_equipped)
+        cd_txt = f"\n⏱️ 다음 낚시까지 {_format_wait_time(cd_seconds)}"
+
         new_txt = ""
         if is_new:
             new_txt = f"\n🎉 **새로운 물고기 도감 등록!**"
 
         m_name = MAPS.get(map_id, MAPS["river"])["name"]
         try:
-            await channel.send(f"🤖🎣 <@{user_id}> 자동낚시 ({m_name}){bait_txt}\n{format_fish_catch(fish)}{new_txt}")
+            await channel.send(
+                f"🤖🎣 <@{user_id}> 자동낚시 ({m_name}){bait_txt}{cd_txt}\n{catch_txt}{new_txt}"
+            )
         except Exception:
             pass
 
@@ -660,9 +784,213 @@ async def _vip_discount_rate(user_id: int) -> float:
     return min(0.35, streak_part + rod_part)
 
 
+async def _set_lucky_buff(user_id: int, on: bool) -> None:
+    def mut(d):
+        d = dict(d or {})
+        s = get_user_dict(d, user_id, {})
+        if on:
+            s["lucky_buff"] = 1
+        else:
+            s.pop("lucky_buff", None)
+        return d
+
+    await update_json(CASINO_STATS_PATH, _default_casino_stats(), mut)
+
+
+async def _consume_lucky_buff(user_id: int) -> bool:
+    all_stats = await read_json(CASINO_STATS_PATH, _default_casino_stats())
+    s = (all_stats or {}).get(str(user_id)) or {}
+    if not s.get("lucky_buff"):
+        return False
+    await _set_lucky_buff(user_id, False)
+    return True
+
+
 async def _casino_fee(user_id: int, base_fee: float) -> float:
     disc = await _vip_discount_rate(user_id)
-    return max(0.0, base_fee * (1.0 - disc))
+    fee = max(0.0, base_fee * (1.0 - disc))
+    all_stats = await read_json(CASINO_STATS_PATH, _default_casino_stats())
+    if (all_stats or {}).get(str(user_id), {}).get("lucky_buff"):
+        fee *= 0.5
+        await _consume_lucky_buff(user_id)
+    return fee
+
+
+async def apply_chest_rewards(user_id: int, rewards: dict) -> str:
+    if rewards.get("money", 0) > 0:
+        await add_money(user_id, int(rewards["money"]))
+    for iid, qty in (rewards.get("items") or {}).items():
+        await add_fish(user_id, str(iid), int(qty))
+    for fid, qty in (rewards.get("fish") or {}).items():
+        await add_fish(user_id, str(fid), int(qty))
+        fish = FISH_BY_ID.get(str(fid))
+        if fish:
+            await bump_stats(user_id, fish.rarity)
+            await add_to_collection(user_id, fish.id)
+    return "\n".join(rewards.get("lines") or ["(보상 없음)"])
+
+
+async def get_weather_state() -> dict:
+    w = await read_json(WEATHER_PATH, _default_weather())
+    now = utc_ts()
+    if int(w.get("until", 0)) <= now:
+        wid, until = roll_weather()
+        w = {"id": wid, "until": until}
+        await write_json(WEATHER_PATH, w)
+    return w
+
+
+async def get_profile(user_id: int) -> dict:
+    all_p = await read_json(PROFILE_PATH, _default_profile())
+    p = dict((all_p or {}).get(str(user_id)) or {})
+    p.setdefault("achievements", [])
+    p.setdefault("title", "title_rookie")
+    p.setdefault("fish_total", 0)
+    p.setdefault("chest_total", 0)
+    p.setdefault("shiny_total", 0)
+    p.setdefault("legendary_total", 0)
+    p.setdefault("mythic_total", 0)
+    p.setdefault("boss_hits", 0)
+    p.setdefault("casino_wins", 0)
+    p.setdefault("casino_plays", 0)
+    p.setdefault("duel_wins", 0)
+    p.setdefault("gacha_total", 0)
+    p.setdefault("weekly_fish", 0)
+    p.setdefault("weekly_key", "")
+    return p
+
+
+async def save_profile(user_id: int, profile: dict) -> None:
+    def mut(d):
+        d = dict(d or {})
+        d[str(user_id)] = profile
+        return d
+
+    await update_json(PROFILE_PATH, _default_profile(), mut)
+
+
+async def profile_update(user_id: int, mutator) -> dict:
+    def mut(d):
+        d = dict(d or {})
+        p = dict((d.get(str(user_id)) or {}))
+        mutator(p)
+        d[str(user_id)] = p
+        return d
+
+    return await update_json(PROFILE_PATH, _default_profile(), mut)
+
+
+async def check_achievements(user_id: int, rod_level: int, money: int) -> list[str]:
+    profile = await get_profile(user_id)
+    newly = []
+    for ach_id in ACHIEVEMENTS:
+        if ach_id in profile.get("achievements", []):
+            continue
+        if achievement_progress(profile, ach_id, rod_level, money):
+            profile.setdefault("achievements", []).append(ach_id)
+            newly.append(ach_id)
+            await add_money(user_id, int(ACHIEVEMENTS[ach_id]["reward"]))
+    if newly:
+        await save_profile(user_id, profile)
+    return newly
+
+
+async def quest_bump(user_id: int, qtype: str, amount: int = 1, extra: int = 0) -> None:
+    def mut(p):
+        day = today_key()
+        wk = week_key()
+        if p.get("weekly_key") != wk:
+            p["weekly_key"] = wk
+            p["weekly_fish"] = 0
+            p["weekly_quest"] = dict(WEEKLY_QUEST)
+            p["weekly_progress"] = 0
+            p["weekly_done"] = False
+
+        if p.get("quest_day") != day or not p.get("daily_quest"):
+            p["quest_day"] = day
+            p["daily_quest"] = pick_daily_quest()
+            p["daily_progress"] = 0
+            p["daily_done"] = False
+
+        if not p.get("daily_done"):
+            dq = p["daily_quest"]
+            if dq.get("type") == qtype:
+                if qtype == "sell_gold":
+                    p["daily_progress"] = int(p.get("daily_progress", 0)) + int(extra)
+                else:
+                    p["daily_progress"] = int(p.get("daily_progress", 0)) + int(amount)
+
+        if not p.get("weekly_done") and p.get("weekly_quest", {}).get("type") == qtype:
+            if qtype != "sell_gold":
+                p["weekly_progress"] = int(p.get("weekly_progress", 0)) + int(amount)
+
+    await profile_update(user_id, mut)
+
+
+async def perform_fishing_catch(
+    user_id: int,
+    rod_type: str,
+    rod_level: int,
+    map_id: str,
+    active_bait_id: str | None,
+) -> tuple[str, bool]:
+    """반환: (결과 메시지 본문, 도감 신규 여부)"""
+    weather = await get_weather_state()
+    wid = weather.get("id", "sunny")
+    wbonus_chest = chest_chance_bonus(wid)
+    wbonus_rarity = float(WEATHER_TYPES.get(wid, {}).get("rarity_bonus", 0.0))
+
+    kind, payload = roll_fishing_catch(
+        rod_level, rod_type, map_id, active_bait_id,
+        extra_chest_chance=wbonus_chest,
+        extra_rarity_boost=wbonus_rarity,
+    )
+
+    def bump_profile(p):
+        if kind == "chest":
+            p["chest_total"] = int(p.get("chest_total", 0)) + 1
+        else:
+            p["fish_total"] = int(p.get("fish_total", 0)) + 1
+            p["weekly_fish"] = int(p.get("weekly_fish", 0)) + 1
+
+    await profile_update(user_id, bump_profile)
+
+    if kind == "chest":
+        chest_id = str(payload)
+        await add_fish(user_id, chest_id, 1)
+        await quest_bump(user_id, "chest", 1)
+        return format_chest_drop(chest_id), False
+
+    fish = payload
+    is_shiny = random.random() < shiny_chance(rod_level, wid)
+    inv_key = _fish_inv_key(fish.id, is_shiny)
+
+    await add_fish(user_id, inv_key, 1)
+    await bump_stats(user_id, fish.rarity)
+
+    def bump_rarity(p):
+        if is_shiny:
+            p["shiny_total"] = int(p.get("shiny_total", 0)) + 1
+        if fish.rarity == "legendary":
+            p["legendary_total"] = int(p.get("legendary_total", 0)) + 1
+        if fish.rarity == "mythic":
+            p["mythic_total"] = int(p.get("mythic_total", 0)) + 1
+
+    await profile_update(user_id, bump_rarity)
+
+    is_new = await add_to_collection(user_id, fish.id)
+    await quest_bump(user_id, "fish", 1)
+    if fish.rarity in ("rare", "epic", "legendary", "mythic"):
+        await quest_bump(user_id, "rare_plus", 1)
+
+    if is_shiny:
+        sell = fish.sell * 3
+        return (
+            f"✨✨ **이색 물고기!** {RARITY_FLAIR.get(fish.rarity,'🐟')} **{fish.name}** "
+            f"(이색 판매가: {sell:,}원)",
+            is_new,
+        )
+    return format_fish_catch(fish), is_new
 
 
 @bot.command(name="잭팟")
@@ -766,6 +1094,8 @@ async def on_ready():
     print(f"Logged in as {bot.user} (id={bot.user.id})")
     if not auto_fish_loop.is_running():
         auto_fish_loop.start()
+    if not weather_refresh_loop.is_running():
+        weather_refresh_loop.start()
     ch_id = _env_int("ANNOUNCE_CHANNEL_ID")
     if ch_id:
         ch = bot.get_channel(ch_id)
@@ -808,6 +1138,40 @@ async def help_cmd(ctx: commands.Context):
         "- `!잭팟` 현재 잭팟 누적 금액 확인\n"
         "- `!잭팟랭킹` 잭팟 명예의 전당 랭킹\n"
         "- `!카지노` 본인의 카지노 상세 기록\n"
+        "- `!룰렛 <베팅> <빨강|검정|초록>` 룰렛 색상 베팅\n"
+        "- `!바카라 <베팅> <플레이어|뱅커>` 바카라\n"
+        "- `!하이로우 <베팅> <하이|로우>` 숫자 맞추기\n"
+        "- `!복권 <베팅>` 행운 복권 (3개 번호)\n"
+        "- `!가위바위보 <베팅> <가위|바위|보>`\n"
+        "- `!더블업 <베팅>` 50% 확률로 2배\n"
+        "- `!행운바퀴 <베팅>` 룰렛형 행운의 바퀴\n"
+        "- `!블랙잭 <베팅>` 간이 블랙잭\n"
+        "- `!주화` 행운의 주화 사용 (카지노 수수료 50%↓ 1회)\n"
+        "\n"
+        "**📦 보물상자 (낚시 드롭)**\n"
+        "- `!상자` 보유 상자 목록\n"
+        "- `!상자깨기 <상자ID|all>` 상자 개봉\n"
+        "- `!상자정보` 상자 종류 설명\n"
+        "\n"
+        "**🎁 이벤트**\n"
+        "- `!일일` 하루 1회 출석 보상\n"
+        "- `!보물상자` 30분마다 무료 보물 (쿨타임)\n"
+        "\n"
+        "**🌟 확장 컨텐츠**\n"
+        "- `!프로필` 내 통계·칭호·업적\n"
+        "- `!퀘스트` 일일/주간 퀘스트\n"
+        "- `!업적` 업적 목록\n"
+        "- `!칭호 [ID]` 칭호 장착/목록\n"
+        "- `!날씨` 서버 날씨 (낚시 보너스)\n"
+        "- `!시세` 오늘 물고기 시세\n"
+        "- `!뽑기` 가챠 뽑기\n"
+        "- `!수수권` 신비한 상인 (1시간)\n"
+        "- `!제작 <아이템ID>` 물고기로 제작\n"
+        "- `!대결 @유저 <베팅>` 낚시 대결\n"
+        "- `!낚시랭킹` 주간 낚시 횟수 랭킹\n"
+        "- `!스크래치 <베팅>` 복권 긁기\n"
+        "- `!로켓 <베팅> <배율>` 로켓 멀티\n"
+        "- `!대출 <금액>` / `!상환` (이자 10%)\n"
     )
     await ctx.reply(msg, mention_author=False)
 
@@ -833,7 +1197,10 @@ async def shop_cmd(ctx: commands.Context):
     lines = ["**🎣 낚시대 상점** (구매: `!구매 <낚시대ID>`)\n"]
     for rod_id, info in RODS.items():
         price = int(info.get("price", 0))
-        lines.append(f"- `{rod_id}`: **{info['name']}** / 가격: **{_fmt_money(price)}**")
+        req = int(info.get("req_level", 0))
+        req_txt = f" (요구 **+{req}강**)" if req > 0 else ""
+        desc = rod_passive_text(rod_id)
+        lines.append(f"- `{rod_id}`: **{info['name']}** — {desc}{req_txt}\n  가격: **{_fmt_money(price)}**")
     await ctx.reply("\n".join(lines), mention_author=False)
 
 
@@ -852,6 +1219,15 @@ async def buy_cmd(ctx: commands.Context, item_id: str | None = None, amount_raw:
         cur_type, cur_level = await get_rod(ctx.author.id)
         if item_id == cur_type:
             await ctx.reply("이미 같은 낚시대를 사용 중이야.", mention_author=False)
+            return
+
+        req = int(RODS[item_id].get("req_level", 0))
+        if cur_level < req:
+            await ctx.reply(
+                f"구매 조건 미달! **{RODS[item_id]['name']}**는 낚시대 **+{req}강** 이상 필요.\n"
+                f"현재: **{format_rod_name(cur_type, cur_level)}**",
+                mention_author=False,
+            )
             return
 
         price = int(RODS[item_id].get("price", 0))
@@ -881,9 +1257,17 @@ async def buy_cmd(ctx: commands.Context, item_id: str | None = None, amount_raw:
         if amount <= 0:
             await ctx.reply("구매 수량은 1개 이상이어야 해.", mention_author=False)
             return
-            
+
         info = ITEMS[item_id]
         price_unit = int(info["price"])
+        merchant = await read_json(MERCHANT_PATH, _default_merchant())
+        m_offer = None
+        if int(merchant.get("until", 0)) > utc_ts():
+            for it in merchant.get("items", []):
+                if it.get("id") == item_id and int(it.get("stock_left", 0)) > 0:
+                    m_offer = it
+                    price_unit = int(price_unit * float(it.get("discount", 1.0)))
+                    break
         total_price = price_unit * amount
         
         money = await get_money(ctx.author.id)
@@ -896,9 +1280,27 @@ async def buy_cmd(ctx: commands.Context, item_id: str | None = None, amount_raw:
             
         await add_money(ctx.author.id, -total_price)
         await add_fish(ctx.author.id, item_id, amount)
-        
+
+        if m_offer:
+            stock = int(m_offer.get("stock_left", 0))
+            if amount > stock:
+                await ctx.reply(f"수수권 재고 부족! 남은 수량: **{stock}**", mention_author=False)
+                return
+
+            def mut_m(d):
+                d = dict(d or {})
+                for it in d.get("items", []):
+                    if it.get("id") == item_id:
+                        it["stock_left"] = max(0, int(it.get("stock_left", 0)) - amount)
+                return d
+
+            await update_json(MERCHANT_PATH, _default_merchant(), mut_m)
+            disc_txt = f" (🧙 수수권 할인가)"
+        else:
+            disc_txt = ""
+
         await ctx.reply(
-            f"🛒 구매 완료! **{info['name']} x{amount}**을(를) 구매하여 인벤토리에 추가했습니다. (소모: {_fmt_money(total_price)})",
+            f"🛒 구매 완료! **{info['name']} x{amount}**{disc_txt} (소모: {_fmt_money(total_price)})",
             mention_author=False,
         )
         return
@@ -1085,44 +1487,51 @@ async def fish_cmd(ctx: commands.Context):
     last = await get_last_fish_ts(user_id)
     wait = (last + cd_seconds) - now
     if wait > 0:
-        await ctx.reply(f"쿨타임이야. **{wait}초** 뒤에 다시 낚시 가능!", mention_author=False)
+        bait_line = ""
+        bait_id = await get_user_bait(user_id)
+        if bait_id and bait_id in ITEMS:
+            inv = await get_inventory(user_id)
+            bait_line = (
+                f"\n🪱 장착 미끼: **{ITEMS[bait_id]['name']}** "
+                f"(보유 **{int(inv.get(bait_id, 0))}개**)"
+            )
+        await ctx.reply(
+            f"⏱️ 낚시 쿨타임! {_format_wait_time(wait)} 뒤에 다시 가능해.{bait_line}",
+            mention_author=False,
+        )
         return
 
     # 2. 맵 정보 및 미끼 소모
     map_id = await get_user_map(user_id)
+    had_bait_equipped = bool(await get_user_bait(user_id))
     bait_consumed = await consume_active_bait(user_id)
     active_bait_id = bait_consumed["bait_id"] if bait_consumed else None
 
-    # 3. 낚시 결과 결정
-    weights = get_rarity_weights(rod_level, rod_type, map_id, active_bait_id)
-    rarity = choose_rarity(weights)
-    fish = choose_fish(rarity)
-
-    # 4. 데이터 저장
     await set_last_fish_ts(user_id, now)
-    await add_fish(user_id, fish.id, 1)
-    await bump_stats(user_id, fish.rarity)
-    
-    # 도감 등록
-    is_new = await add_to_collection(user_id, fish.id)
+    catch_txt, is_new = await perform_fishing_catch(
+        user_id, rod_type, rod_level, map_id, active_bait_id
+    )
 
-    # 5. 출력 메시지 포맷팅
-    bait_txt = ""
-    if bait_consumed:
-        bait_name = bait_consumed["item_info"]["name"]
-        if bait_consumed["exhausted"]:
-            bait_txt = f"\n(소모: {bait_name} - ⚠️ **미끼를 모두 소모하여 장착 해제되었습니다!**)"
-        else:
-            bait_txt = f"\n(소모: {bait_name})"
-            
+    bait_txt = _format_bait_status(bait_consumed, had_bait_equipped)
+    cd_txt = f"\n⏱️ 다음 낚시까지 {_format_wait_time(cd_seconds)}"
+
     new_txt = ""
     if is_new:
         new_txt = f"\n🎉 **새로운 물고기 도감 등록!**"
 
     m_name = MAPS.get(map_id, MAPS["river"])["name"]
+    w = await get_weather_state()
+    wtxt = WEATHER_TYPES.get(w.get("id", "sunny"), {}).get("name", "")
+    rod_lv = (await get_rod(user_id))[1]
+    ach_new = await check_achievements(user_id, rod_lv, await get_money(user_id))
+    ach_txt = ""
+    if ach_new:
+        lines = [f"🏆 업적 달성: **{ACHIEVEMENTS[a]['name']}** (+{_fmt_money(ACHIEVEMENTS[a]['reward'])})" for a in ach_new[:3]]
+        ach_txt = "\n" + "\n".join(lines)
+
     await ctx.reply(
-        f"**{ctx.author.display_name}** 낚시 성공! ({m_name}){bait_txt}\n"
-        f"{format_fish_catch(fish)}{new_txt}",
+        f"**{ctx.author.display_name}** 낚시 성공! ({m_name}) {wtxt}{bait_txt}{cd_txt}\n"
+        f"{catch_txt}{new_txt}{ach_txt}",
         mention_author=False,
     )
 
@@ -1189,15 +1598,21 @@ async def inv_cmd(ctx: commands.Context):
     total_items = 0
     total_value = 0
     
+    mkt = market_mult_today()
     for item_key, cnt in sorted(inv.items(), key=lambda kv: (-kv[1], kv[0])):
-        if item_key in FISH_BY_ID:
-            fish = FISH_BY_ID[item_key]
+        if item_key in FISH_BY_ID or item_key.startswith("shiny_"):
+            sp = _fish_sell_price(item_key)
             total_items += cnt
-            total_value += fish.sell * cnt
-            fish_lines.append(f"- {fish.name} x{cnt} (개당 {fish.sell}원)")
+            total_value += int(sp * mkt * cnt)
+            fish_lines.append(f"- {_inv_item_display(item_key)} x{cnt} (개당 {int(sp*mkt):,}원)")
+        elif item_key in CHESTS:
+            info = CHESTS[item_key]
+            item_lines.append(f"- {info['name']} x{cnt} (`!상자깨기 {item_key}`)")
         elif item_key in ITEMS:
             info = ITEMS[item_key]
-            item_lines.append(f"- {info['name']} x{cnt}")
+            price = int(info.get("price", 0))
+            sell_hint = f" / 판매 {price:,}원" if price > 0 else ""
+            item_lines.append(f"- {info['name']} x{cnt}{sell_hint}")
 
     lines = [f"**🎒 {ctx.author.display_name}**의 인벤토리\n"]
     
@@ -1208,14 +1623,22 @@ async def inv_cmd(ctx: commands.Context):
     else:
         lines.append("🐟 *물고기 보관함이 비어있습니다.*")
         
-    if item_lines:
-        lines.append("\n**📦 소모품**")
-        lines.extend(item_lines)
+    chest_lines = [l for l in item_lines if "상자깨기" in l]
+    other_items = [l for l in item_lines if "상자깨기" not in l]
+    if chest_lines:
+        lines.append("\n**📦 보물상자**")
+        lines.extend(chest_lines)
+    if other_items:
+        lines.append("\n**🎒 소모품·재료**")
+        lines.extend(other_items)
         
     # 현재 장착 중인 미끼 표시
     bait = await get_user_bait(ctx.author.id)
     if bait:
-        lines.append(f"\n🎣 **현재 장착 미끼**: {ITEMS[bait]['name']}")
+        qty = int(inv.get(bait, 0))
+        lines.append(
+            f"\n🎣 **현재 장착 미끼**: {ITEMS[bait]['name']} (보유 **{qty}개**, 낚시 시 1개 소모)"
+        )
         
     # 현재 위치한 낚시터 표시
     map_id = await get_user_map(ctx.author.id)
@@ -1238,17 +1661,21 @@ async def sell_cmd(ctx: commands.Context, *, target: str | None = None):
         await ctx.reply("팔 게 없어. `!낚시`부터!", mention_author=False)
         return
 
-    # 도감 완성 버프 (일반 도감 완성 시 판매가 5% 보너스)
     buffs = await get_collection_buffs(ctx.author.id)
-    sell_mult = 1.0 + buffs.get("sell_bonus", 0.0)
-    bonus_txt = " (도감 버프 +5% 적용)" if buffs.get("sell_bonus", 0.0) > 0 else ""
+    rod_type, _ = await get_rod(ctx.author.id)
+    sell_mult = (1.0 + buffs.get("sell_bonus", 0.0)) * _rod_sell_mult(rod_type) * market_mult_today()
+    bonus_parts = []
+    if buffs.get("sell_bonus", 0.0) > 0:
+        bonus_parts.append("도감 +5%")
+    if _rod_sell_mult(rod_type) > 1.0:
+        bonus_parts.append("낚시대 판매보너스")
+    bonus_txt = f" ({', '.join(bonus_parts)} 적용)" if bonus_parts else ""
 
     if target.lower() == "all":
         total = 0
         for fish_id, cnt in inv.items():
-            fish = FISH_BY_ID.get(fish_id)
-            if fish:
-                total += int(math.floor(fish.sell * cnt * sell_mult))
+            if fish_id in FISH_BY_ID or fish_id.startswith("shiny_"):
+                total += int(math.floor(_fish_sell_price(fish_id) * cnt * sell_mult))
                 
         if total <= 0:
             await ctx.reply("인벤토리에 판매 가능한 물고기가 없어.", mention_author=False)
@@ -1259,7 +1686,7 @@ async def sell_cmd(ctx: commands.Context, *, target: str | None = None):
             uinv = get_user_dict(d, ctx.author.id, {})
             # 일반 물고기 아이템만 삭제하고 소모품(미끼, 주문서 등)은 보존
             for key in list(uinv.keys()):
-                if key in FISH_BY_ID:
+                if key in FISH_BY_ID or key.startswith("shiny_"):
                     uinv.pop(key, None)
             if not uinv:
                 d.pop(str(ctx.author.id), None)
@@ -1267,6 +1694,7 @@ async def sell_cmd(ctx: commands.Context, *, target: str | None = None):
 
         await update_json(INV_PATH, _default_inventory(), mut)
         bal = await add_money(ctx.author.id, total)
+        await quest_bump(ctx.author.id, "sell_gold", 0, extra=total)
         await ctx.reply(
             f"전부 판매 완료!{bonus_txt} 획득: **{_fmt_money(total)}** / 현재 잔액: **{_fmt_money(bal)}**",
             mention_author=False,
@@ -1275,19 +1703,40 @@ async def sell_cmd(ctx: commands.Context, *, target: str | None = None):
 
     fish = FISH_BY_NAME.get(target)
     if not fish:
-        await ctx.reply("그 물고기는 몰라. 정확한 이름으로 다시 입력해줘.", mention_author=False)
+        for iid, info in ITEMS.items():
+            if info.get("name") == target or iid == target:
+                price = int(info.get("price", 0))
+                if price <= 0:
+                    break
+                cnt = int(inv.get(iid, 0))
+                if cnt <= 0:
+                    await ctx.reply("그 아이템은 인벤에 없어.", mention_author=False)
+                    return
+                value = price * cnt
+                await add_fish(ctx.author.id, iid, -cnt)
+                bal = await add_money(ctx.author.id, value)
+                await ctx.reply(
+                    f"**{info['name']} x{cnt}** 판매 완료! 획득: **{_fmt_money(value)}** / 잔액: **{_fmt_money(bal)}**",
+                    mention_author=False,
+                )
+                return
+        await ctx.reply("그 물고기/아이템은 몰라. 정확한 이름으로 다시 입력해줘.", mention_author=False)
         return
 
-    cnt = int(inv.get(fish.id, 0))
+    key = fish.id
+    if target.startswith("이색") or "이색" in target:
+        key = f"shiny_{fish.id}"
+    cnt = int(inv.get(key, 0))
     if cnt <= 0:
         await ctx.reply("그 물고기는 인벤에 없어.", mention_author=False)
         return
 
-    value = int(math.floor(fish.sell * cnt * sell_mult))
-    await add_fish(ctx.author.id, fish.id, -cnt)
+    value = int(math.floor(_fish_sell_price(key) * cnt * sell_mult))
+    await add_fish(ctx.author.id, key, -cnt)
     bal = await add_money(ctx.author.id, value)
+    await quest_bump(ctx.author.id, "sell_gold", 0, extra=value)
     await ctx.reply(
-        f"**{fish.name} x{cnt}** 판매 완료!{bonus_txt} 획득: **{_fmt_money(value)}** / 잔액: **{_fmt_money(bal)}**",
+        f"**{_inv_item_display(key)} x{cnt}** 판매 완료!{bonus_txt} 획득: **{_fmt_money(value)}** / 잔액: **{_fmt_money(bal)}**",
         mention_author=False,
     )
 
@@ -1449,6 +1898,28 @@ async def rod_ranking_cmd(ctx: commands.Context):
     await ctx.reply("\n".join(lines), mention_author=False)
 
 
+async def _slot_calc(user_id: int, bet: int, guild_id: int | None) -> tuple[int, str]:
+    """반환: (지급액 win, 메시지). 베팅 차감은 호출자가 처리."""
+    a, b, c, payout_mult, jackpot_hit, label = spin_slot()
+    fee = await _casino_fee(user_id, SLOT_WIN_FEE) if payout_mult > 0 else 0.0
+    win = int(bet * payout_mult * (1.0 - fee)) if payout_mult > 0 else 0
+
+    jackpot_take = 0
+    if jackpot_hit:
+        jackpot_take = await _jackpot_take_all()
+        win += jackpot_take
+        if jackpot_take > 0:
+            await _jackpot_record_hit(guild_id, user_id, jackpot_take)
+
+    net = win - bet
+    if payout_mult <= 0:
+        body = f"🎰 [{a} | {b} | {c}] 꽝!"
+    else:
+        extra = f"\n💥 **잭팟 +{_fmt_money(jackpot_take)}**" if jackpot_take else ""
+        body = f"🎰 [{a} | {b} | {c}] **{label}** (x{payout_mult:g}) → **{_fmt_money(net)}**{extra}"
+    return win, body
+
+
 @bot.command(name="슬롯")
 async def slot_cmd(ctx: commands.Context, bet_raw: str | None = None):
     bet = _parse_bet(bet_raw)
@@ -1462,66 +1933,18 @@ async def slot_cmd(ctx: commands.Context, bet_raw: str | None = None):
             await ctx.reply(err, mention_author=False)
         return
 
-    # 선차감 + 잭팟 적립(베팅의 5%)
     await add_money(ctx.author.id, -bet)
-    pot_after_add = await _jackpot_add(int(bet * 0.05))
+    pot_after_add = await _jackpot_add(int(bet * SLOT_JACKPOT_RATE))
 
-    symbols = ["🍒", "🍋", "🍇", "🔔", "⭐", "7️⃣"]
-    weights = [35, 28, 18, 10, 7, 2]  # 7은 매우 낮게
-    a, b, c = random.choices(symbols, weights=weights, k=3)
-
-    payout_mult = 0.0
-    jackpot_hit = False
-    if a == b == c == "7️⃣":
-        payout_mult = 12.0
-        jackpot_hit = True
-    elif a == b == c == "⭐":
-        payout_mult = 8.0
-    elif a == b == c == "🔔":
-        payout_mult = 5.0
-    elif a == b == c:
-        payout_mult = 3.0
-    elif len({a, b, c}) == 2:
-        payout_mult = 1.2
-
-    # 하우스 엣지: 승리 시에도 수수료 (VIP 할인 적용)
-    fee = await _casino_fee(ctx.author.id, 0.03)
-    win = int(bet * payout_mult * (1.0 - fee))
-
-    bonus_spin = 0
-    if a == b == c == "🍒" and random.random() < 0.35:
-        bonus_spin = 1
-    if a == b == c == "⭐" and random.random() < 0.20:
-        bonus_spin = 1
-
-    jackpot_take = 0
-    if jackpot_hit:
-        jackpot_take = await _jackpot_take_all()
-        win += jackpot_take
-        await _jackpot_record_hit(ctx.guild.id if ctx.guild else None, ctx.author.id, jackpot_take)
-
+    win, body = await _slot_calc(ctx.author.id, bet, ctx.guild.id if ctx.guild else None)
     await add_money(ctx.author.id, win)
     net = win - bet
     await _casino_bump(ctx.author.id, bet, net, "슬롯")
     bal = await get_money(ctx.author.id)
-
-    if payout_mult == 0.0:
-        await ctx.reply(
-            f"🎰 [{a} | {b} | {c}] 꽝! **-{_fmt_money(bet)}**\n"
-            f"잭팟: **{_fmt_money(pot_after_add)}** / 잔액: **{_fmt_money(bal)}**",
-            mention_author=False,
-        )
-    else:
-        extra = ""
-        if jackpot_hit:
-            extra = f"\n💥 **잭팟 당첨!** 잭팟: **{_fmt_money(jackpot_take)}**"
-        if bonus_spin:
-            extra += "\n🎁 **보너스 스핀 1회!** (같은 베팅으로 한 번 더 돌려봐)"
-        await ctx.reply(
-            f"🎰 [{a} | {b} | {c}] 적중! 배당 x{payout_mult:g}\n"
-            f"결과: **{_fmt_money(net)}** / 잭팟: **{_fmt_money(pot_after_add)}** / 잔액: **{_fmt_money(bal)}**{extra}",
-            mention_author=False,
-        )
+    await ctx.reply(
+        f"{body}\n잭팟: **{_fmt_money(pot_after_add)}** / 잔액: **{_fmt_money(bal)}**",
+        mention_author=False,
+    )
 
 
 @bot.command(name="슬롯10")
@@ -1547,67 +1970,40 @@ async def slot10_cmd(ctx: commands.Context, bet_raw: str | None = None):
         )
         return
 
-    # 선결제 + 잭팟 적립(슬롯은 5%)
     await add_money(ctx.author.id, -needed)
-    pot_after_add = await _jackpot_add(int(needed * 0.05))
+    pot_after_add = await _jackpot_add(int(needed * SLOT_JACKPOT_RATE))
 
-    symbols = ["🍒", "🍋", "🍇", "🔔", "⭐", "7️⃣"]
-    weights = [35, 28, 18, 10, 7, 2]
-    fee = await _casino_fee(ctx.author.id, 0.03)
-
-    total_win = 0
     total_net = -needed
     hits = 0
     jackpots = 0
-    best_line = None
-    best_mult = 0.0
-    jackpot_take_total = 0
+    best_body = ""
+    best_net = -bet
 
+    total_win = 0
     for _ in range(spins):
-        a, b, c = random.choices(symbols, weights=weights, k=3)
-        payout_mult = 0.0
-        jackpot_hit = False
-        if a == b == c == "7️⃣":
-            payout_mult = 12.0
-            jackpot_hit = True
-        elif a == b == c == "⭐":
-            payout_mult = 8.0
-        elif a == b == c == "🔔":
-            payout_mult = 5.0
-        elif a == b == c:
-            payout_mult = 3.0
-        elif len({a, b, c}) == 2:
-            payout_mult = 1.2
-
-        win = int(bet * payout_mult * (1.0 - fee))
-        if jackpot_hit:
-            take = await _jackpot_take_all()
-            if take > 0:
-                await _jackpot_record_hit(ctx.guild.id if ctx.guild else None, ctx.author.id, take)
-            win += take
-            jackpot_take_total += take
-            jackpots += 1
-
+        win, body = await _slot_calc(
+            ctx.author.id, bet, ctx.guild.id if ctx.guild else None
+        )
         total_win += win
-        if payout_mult > 0:
+        spin_net = win - bet
+        total_net += spin_net
+        if spin_net > 0:
             hits += 1
-        if payout_mult > best_mult:
-            best_mult = payout_mult
-            best_line = (a, b, c)
+        if "잭팟" in body:
+            jackpots += 1
+        if spin_net > best_net:
+            best_net = spin_net
+            best_body = body
 
     await add_money(ctx.author.id, total_win)
-    total_net += total_win
     await _casino_bump(ctx.author.id, needed, total_net, "슬롯10")
     bal = await get_money(ctx.author.id)
 
-    line_txt = f"[{best_line[0]} | {best_line[1]} | {best_line[2]}]" if best_line else "(베스트 없음)"
-    extra = ""
-    if jackpots:
-        extra = f"\n💥 잭팟 {jackpots}회 (회수: **{_fmt_money(jackpot_take_total)}**)"
+    extra = f"\n💥 잭팟 {jackpots}회!" if jackpots else ""
     await ctx.reply(
         f"🎰 **슬롯 10연속 결과**\n"
         f"- 적중: **{hits}/10**\n"
-        f"- 베스트: {line_txt} (x{best_mult:g})\n"
+        f"- 베스트: {best_body or '(없음)'}\n"
         f"- 순수익: **{_fmt_money(total_net)}**\n"
         f"- 잭팟: **{_fmt_money(pot_after_add)}** / 잔액: **{_fmt_money(bal)}**{extra}",
         mention_author=False,
@@ -1631,9 +2027,19 @@ async def dice_cmd(ctx: commands.Context, bet_raw: str | None = None):
     await _jackpot_add(int(bet * 0.02))
 
     roll = random.randint(1, 6)
-    win = roll >= 4
-    mult = 1.8  # 약한 하우스 엣지
-    fee = await _casino_fee(ctx.author.id, 0.02)
+    if roll == 6:
+        mult = 2.5
+        win = True
+        roll_txt = "🎉 **잭팟 주사위 6!**"
+    elif roll >= 4:
+        mult = 1.95
+        win = True
+        roll_txt = "승!"
+    else:
+        mult = 0.0
+        win = False
+        roll_txt = "패"
+    fee = await _casino_fee(ctx.author.id, 0.01)
 
     if win:
         gross = int(bet * mult)
@@ -1643,23 +2049,37 @@ async def dice_cmd(ctx: commands.Context, bet_raw: str | None = None):
         await _casino_bump(ctx.author.id, bet, net, "주사위")
         bal = await get_money(ctx.author.id)
         await ctx.reply(
-            f"🎲 주사위: **{roll}** (승!)\n결과: **+{_fmt_money(net)}** / 잔액: **{_fmt_money(bal)}**",
+            f"🎲 주사위: **{roll}** ({roll_txt})\n결과: **+{_fmt_money(net)}** / 잔액: **{_fmt_money(bal)}**",
             mention_author=False,
         )
     else:
         await _casino_bump(ctx.author.id, bet, -bet, "주사위")
         bal = await get_money(ctx.author.id)
         await ctx.reply(
-            f"🎲 주사위: **{roll}** (패)\n결과: **-{_fmt_money(bet)}** / 잔액: **{_fmt_money(bal)}**",
+            f"🎲 주사위: **{roll}** ({roll_txt})\n결과: **-{_fmt_money(bet)}** / 잔액: **{_fmt_money(bal)}**",
             mention_author=False,
         )
+
+
+def _parse_coin_choice(raw: str | None) -> str | None:
+    if not raw:
+        return None
+    c = raw.strip()
+    if c in ("앞", "뒤"):
+        return c
+    return None
 
 
 @bot.command(name="동전")
 async def coin_cmd(ctx: commands.Context, bet_raw: str | None = None, choice_raw: str | None = None):
     bet = _parse_bet(bet_raw)
-    if bet is None or not choice_raw:
-        await ctx.reply("사용법: `!동전 <베팅> <앞|뒤>` (예: `!동전 1500 앞`)", mention_author=False)
+    choice = _parse_coin_choice(choice_raw)
+    if bet is None or choice is None:
+        await ctx.reply(
+            "사용법: `!동전 <베팅> <앞|뒤>` (예: `!동전 1500 앞`)\n"
+            "※ `앞`/`뒤` 오타 시 **베팅금은 차감되지 않아요.**",
+            mention_author=False,
+        )
         return
 
     ok, err = await _casino_guard(ctx, bet)
@@ -1671,16 +2091,11 @@ async def coin_cmd(ctx: commands.Context, bet_raw: str | None = None, choice_raw
     await add_money(ctx.author.id, -bet)
     await _jackpot_add(int(bet * 0.02))
 
-    choice = choice_raw.strip()
-    if choice not in ("앞", "뒤"):
-        await ctx.reply("선택은 `앞` 또는 `뒤`만 가능해.", mention_author=False)
-        return
-
     result = random.choice(["앞", "뒤"])
     win = (choice == result)
 
-    mult = 1.9
-    fee = await _casino_fee(ctx.author.id, 0.03)
+    mult = 1.95
+    fee = await _casino_fee(ctx.author.id, 0.01)
 
     if win:
         gross = int(bet * mult)
@@ -1700,6 +2115,589 @@ async def coin_cmd(ctx: commands.Context, bet_raw: str | None = None, choice_raw
             f"🪙 결과: **{result}** (패)\n결과: **-{_fmt_money(bet)}** / 잔액: **{_fmt_money(bal)}**",
             mention_author=False,
         )
+
+
+@bot.command(name="룰렛")
+async def roulette_cmd(ctx: commands.Context, bet_raw: str | None = None, choice_raw: str | None = None):
+    bet = _parse_bet(bet_raw)
+    if bet is None or not choice_raw:
+        await ctx.reply(
+            "사용법: `!룰렛 <베팅> <빨강|검정|초록>`\n"
+            "- 빨강/검정: x2 / 초록(0): x12",
+            mention_author=False,
+        )
+        return
+    ok, err = await _casino_guard(ctx, bet)
+    if not ok:
+        if err:
+            await ctx.reply(err, mention_author=False)
+        return
+
+    choice = choice_raw.strip().lower()
+    if choice not in ("빨강", "검정", "초록", "red", "black", "green"):
+        await ctx.reply("선택: `빨강`, `검정`, `초록`", mention_author=False)
+        return
+    if choice in ("red",):
+        choice = "빨강"
+    if choice in ("black",):
+        choice = "검정"
+    if choice in ("green",):
+        choice = "초록"
+
+    await add_money(ctx.author.id, -bet)
+    await _jackpot_add(int(bet * 0.02))
+
+    n = random.randint(0, 36)
+    if n == 0:
+        color = "초록"
+        emoji = "🟢"
+    elif n % 2 == 1:
+        color = "빨강"
+        emoji = "🔴"
+    else:
+        color = "검정"
+        emoji = "⚫"
+
+    win = choice == color
+    mult = 12.0 if color == "초록" and win else (2.0 if win else 0.0)
+    fee = await _casino_fee(ctx.author.id, 0.01)
+
+    if win:
+        payout = int(bet * mult * (1.0 - fee))
+        await add_money(ctx.author.id, payout)
+        net = payout - bet
+        await _casino_bump(ctx.author.id, bet, net, "룰렛")
+        bal = await get_money(ctx.author.id)
+        await ctx.reply(
+            f"🎡 룰렛 {emoji} **{n}** ({color}) — **당첨!** x{mult:g}\n"
+            f"결과: **+{_fmt_money(net)}** / 잔액: **{_fmt_money(bal)}**",
+            mention_author=False,
+        )
+    else:
+        await _casino_bump(ctx.author.id, bet, -bet, "룰렛")
+        bal = await get_money(ctx.author.id)
+        await ctx.reply(
+            f"🎡 룰렛 {emoji} **{n}** ({color}) — 패\n"
+            f"결과: **-{_fmt_money(bet)}** / 잔액: **{_fmt_money(bal)}**",
+            mention_author=False,
+        )
+
+
+@bot.command(name="바카라")
+async def baccarat_cmd(ctx: commands.Context, bet_raw: str | None = None, side_raw: str | None = None):
+    bet = _parse_bet(bet_raw)
+    if bet is None or not side_raw:
+        await ctx.reply("사용법: `!바카라 <베팅> <플레이어|뱅커>`", mention_author=False)
+        return
+    ok, err = await _casino_guard(ctx, bet)
+    if not ok:
+        if err:
+            await ctx.reply(err, mention_author=False)
+        return
+
+    side = side_raw.strip().lower()
+    if side not in ("플레이어", "뱅커", "player", "banker"):
+        await ctx.reply("`플레이어` 또는 `뱅커`만 가능", mention_author=False)
+        return
+    if side == "player":
+        side = "플레이어"
+    if side == "banker":
+        side = "뱅커"
+
+    def hand_val(cards: list[int]) -> int:
+        return sum(cards) % 10
+
+    await add_money(ctx.author.id, -bet)
+    p = [random.randint(0, 9), random.randint(0, 9)]
+    b = [random.randint(0, 9), random.randint(0, 9)]
+    pv, bv = hand_val(p), hand_val(b)
+
+    if pv > bv:
+        winner = "플레이어"
+    elif bv > pv:
+        winner = "뱅커"
+    else:
+        winner = "무"
+
+    fee = await _casino_fee(ctx.author.id, 0.01)
+    if winner == "무":
+        await add_money(ctx.author.id, bet)
+        await _casino_bump(ctx.author.id, bet, 0, "바카라")
+        await ctx.reply(
+            f"🃏 바카라 — 플레이어 **{pv}** vs 뱅커 **{bv}**\n**무승부!** 베팅 환급",
+            mention_author=False,
+        )
+        return
+
+    mult = 1.95 if winner == side else 0.0
+    if mult > 0:
+        payout = int(bet * mult * (1.0 - fee))
+        await add_money(ctx.author.id, payout)
+        net = payout - bet
+        await _casino_bump(ctx.author.id, bet, net, "바카라")
+        bal = await get_money(ctx.author.id)
+        await ctx.reply(
+            f"🃏 플레이어 **{pv}** vs 뱅커 **{bv}** → **{winner}** 승!\n"
+            f"당첨! **+{_fmt_money(net)}** / 잔액: **{_fmt_money(bal)}**",
+            mention_author=False,
+        )
+    else:
+        await _casino_bump(ctx.author.id, bet, -bet, "바카라")
+        bal = await get_money(ctx.author.id)
+        await ctx.reply(
+            f"🃏 플레이어 **{pv}** vs 뱅커 **{bv}** → **{winner}** 승\n"
+            f"패! **-{_fmt_money(bet)}** / 잔액: **{_fmt_money(bal)}**",
+            mention_author=False,
+        )
+
+
+@bot.command(name="하이로우")
+async def hilo_cmd(ctx: commands.Context, bet_raw: str | None = None, guess_raw: str | None = None):
+    bet = _parse_bet(bet_raw)
+    if bet is None or not guess_raw:
+        await ctx.reply("사용법: `!하이로우 <베팅> <하이|로우>` (1~100 숫자 맞추기)", mention_author=False)
+        return
+    ok, err = await _casino_guard(ctx, bet)
+    if not ok:
+        if err:
+            await ctx.reply(err, mention_author=False)
+        return
+
+    guess = guess_raw.strip().lower()
+    if guess not in ("하이", "로우", "hi", "lo", "high", "low"):
+        await ctx.reply("`하이` 또는 `로우`", mention_author=False)
+        return
+    is_high = guess in ("하이", "hi", "high")
+
+    await add_money(ctx.author.id, -bet)
+    target = random.randint(1, 100)
+    roll = random.randint(1, 100)
+    win = (roll > target) if is_high else (roll < target)
+    if roll == target:
+        win = None
+
+    fee = await _casino_fee(ctx.author.id, 0.01)
+    if win is None:
+        await add_money(ctx.author.id, bet)
+        await _casino_bump(ctx.author.id, bet, 0, "하이로우")
+        await ctx.reply(
+            f"📊 기준 **{target}** → 나온 수 **{roll}** — **동점!** 환급",
+            mention_author=False,
+        )
+        return
+
+    mult = 1.9
+    if win:
+        payout = int(bet * mult * (1.0 - fee))
+        await add_money(ctx.author.id, payout)
+        net = payout - bet
+        await _casino_bump(ctx.author.id, bet, net, "하이로우")
+        bal = await get_money(ctx.author.id)
+        dir_txt = "하이" if is_high else "로우"
+        await ctx.reply(
+            f"📊 기준 **{target}** / {dir_txt} 선택 → **{roll}** ✅\n"
+            f"**+{_fmt_money(net)}** / 잔액: **{_fmt_money(bal)}**",
+            mention_author=False,
+        )
+    else:
+        await _casino_bump(ctx.author.id, bet, -bet, "하이로우")
+        bal = await get_money(ctx.author.id)
+        await ctx.reply(
+            f"📊 기준 **{target}** → **{roll}** ❌\n"
+            f"**-{_fmt_money(bet)}** / 잔액: **{_fmt_money(bal)}**",
+            mention_author=False,
+        )
+
+
+@bot.command(name="복권")
+async def lottery_cmd(ctx: commands.Context, bet_raw: str | None = None):
+    bet = _parse_bet(bet_raw)
+    if bet is None:
+        await ctx.reply("사용법: `!복권 <베팅>` (3개 번호 맞추기)", mention_author=False)
+        return
+    ok, err = await _casino_guard(ctx, bet)
+    if not ok:
+        if err:
+            await ctx.reply(err, mention_author=False)
+        return
+
+    await add_money(ctx.author.id, -bet)
+    pick = sorted(random.sample(range(1, 10), 3))
+    win_nums = sorted(random.sample(range(1, 10), 3))
+    matches = len(set(pick) & set(win_nums))
+
+    mult = {0: 0.0, 1: 0.5, 2: 2.5, 3: 12.0}.get(matches, 0.0)
+    fee = await _casino_fee(ctx.author.id, 0.01)
+    payout = int(bet * mult * (1.0 - fee)) if mult > 0 else 0
+    await add_money(ctx.author.id, payout)
+    net = payout - bet
+    await _casino_bump(ctx.author.id, bet, net, "복권")
+    bal = await get_money(ctx.author.id)
+
+    await ctx.reply(
+        f"🎫 복권\n- 내 번호: `{pick}` / 당첨: `{win_nums}`\n"
+        f"- 일치: **{matches}개** (x{mult:g})\n"
+        f"결과: **{_fmt_money(net)}** / 잔액: **{_fmt_money(bal)}**",
+        mention_author=False,
+    )
+
+
+def _default_daily() -> Dict[str, str]:
+    return {}
+
+
+@bot.command(name="일일")
+async def daily_cmd(ctx: commands.Context):
+    if not _channel_allowed(ctx):
+        return
+    today = _today_key_utc()
+    d = await read_json(DAILY_PATH, _default_daily())
+    if d.get(str(ctx.author.id)) == today:
+        await ctx.reply("오늘은 이미 출석했어. 내일 다시 와!", mention_author=False)
+        return
+
+    def mut(x):
+        x = dict(x or {})
+        x[str(ctx.author.id)] = today
+        return x
+
+    await update_json(DAILY_PATH, _default_daily(), mut)
+    reward = random.randint(8000, 45000)
+    streak_bonus = random.randint(0, 15000)
+    total = reward + streak_bonus
+    bal = await add_money(ctx.author.id, total)
+    await ctx.reply(
+        f"📅 **일일 출석 완료!**\n"
+        f"- 기본: **{_fmt_money(reward)}** + 보너스: **{_fmt_money(streak_bonus)}**\n"
+        f"- 합계: **{_fmt_money(total)}** / 잔액: **{_fmt_money(bal)}**",
+        mention_author=False,
+    )
+
+
+def _default_treasure() -> Dict[str, int]:
+    return {}
+
+
+@bot.command(name="상자")
+async def chest_list_cmd(ctx: commands.Context):
+    if not _channel_allowed(ctx):
+        return
+    inv = await get_inventory(ctx.author.id)
+    lines = ["**📦 보유 보물상자**"]
+    found = False
+    for cid in CHESTS:
+        cnt = int(inv.get(cid, 0))
+        if cnt > 0:
+            found = True
+            lines.append(f"- `{cid}`: **{CHESTS[cid]['name']}** x{cnt}")
+    if not found:
+        lines.append("보유 상자 없음. `!낚시`로 낚아보자!")
+    lines.append("\n개봉: `!상자깨기 <ID>` / `!상자깨기 all`")
+    await ctx.reply("\n".join(lines), mention_author=False)
+
+
+@bot.command(name="상자정보")
+async def chest_info_cmd(ctx: commands.Context):
+    if not _channel_allowed(ctx):
+        return
+    lines = ["**📦 보물상자 종류** (낚시 시 **약 16%** 확률로 획득)\n"]
+    for cid, c in CHESTS.items():
+        rare = max(e.get("chance", 0) for e in c["rewards"])
+        lines.append(f"- `{cid}`: **{c['name']}** — 최고 보상 확률 ~{int(rare*100)}%")
+    await ctx.reply("\n".join(lines), mention_author=False)
+
+
+@bot.command(name="상자깨기")
+async def chest_open_cmd(ctx: commands.Context, *, target: str | None = None):
+    if not _channel_allowed(ctx):
+        return
+    if not target:
+        await ctx.reply("사용법: `!상자깨기 <상자ID|all>` (예: `!상자깨기 chest_gold`)", mention_author=False)
+        return
+
+    inv = await get_inventory(ctx.author.id)
+    target = target.strip().lower()
+
+    if target == "all":
+        opened = 0
+        all_lines = []
+        for cid in list(CHESTS.keys()):
+            cnt = int(inv.get(cid, 0))
+            for _ in range(cnt):
+                rewards = open_chest(cid)
+                txt = await apply_chest_rewards(ctx.author.id, rewards)
+                all_lines.append(f"**{CHESTS[cid]['name']}** → {txt}")
+                opened += 1
+            if cnt > 0:
+                await add_fish(ctx.author.id, cid, -cnt)
+        if opened == 0:
+            await ctx.reply("깰 상자가 없어.", mention_author=False)
+            return
+        preview = all_lines[:8]
+        extra = f"\n... 외 {opened - 8}개" if opened > 8 else ""
+        bal = await get_money(ctx.author.id)
+        await ctx.reply(
+            f"📦 **{opened}개 상자 개봉 완료!**\n" + "\n".join(preview) + extra + f"\n잔액: **{_fmt_money(bal)}**",
+            mention_author=False,
+        )
+        return
+
+    if target not in CHESTS:
+        await ctx.reply(f"없는 상자 ID. `!상자`로 확인해줘.", mention_author=False)
+        return
+
+    cnt = int(inv.get(target, 0))
+    if cnt <= 0:
+        await ctx.reply("그 상자는 인벤에 없어.", mention_author=False)
+        return
+
+    await add_fish(ctx.author.id, target, -1)
+    rewards = open_chest(target)
+    txt = await apply_chest_rewards(ctx.author.id, rewards)
+    bal = await get_money(ctx.author.id)
+    await ctx.reply(
+        f"📦 **{CHESTS[target]['name']}** 개봉!\n{txt}\n잔액: **{_fmt_money(bal)}**",
+        mention_author=False,
+    )
+
+
+@bot.command(name="주화")
+async def lucky_coin_cmd(ctx: commands.Context):
+    if not _channel_allowed(ctx):
+        return
+    inv = await get_inventory(ctx.author.id)
+    if int(inv.get("lucky_coin", 0)) <= 0:
+        await ctx.reply("행운의 주화가 없어. 상자에서 얻을 수 있어!", mention_author=False)
+        return
+    await add_fish(ctx.author.id, "lucky_coin", -1)
+    await _set_lucky_buff(ctx.author.id, True)
+    await ctx.reply(
+        "🪙 **행운의 주화** 사용!\n다음 카지노 게임 1회 **수수료 50% 추가 감소**",
+        mention_author=False,
+    )
+
+
+@bot.command(name="가위바위보")
+async def rps_cmd(ctx: commands.Context, bet_raw: str | None = None, pick_raw: str | None = None):
+    bet = _parse_bet(bet_raw)
+    if bet is None or not pick_raw:
+        await ctx.reply("사용법: `!가위바위보 <베팅> <가위|바위|보>`", mention_author=False)
+        return
+    ok, err = await _casino_guard(ctx, bet)
+    if not ok:
+        if err:
+            await ctx.reply(err, mention_author=False)
+        return
+
+    picks = {"가위": "✂️", "바위": "🪨", "보": "📄"}
+    p = pick_raw.strip()
+    if p not in picks:
+        await ctx.reply("`가위`, `바위`, `보` 중 선택", mention_author=False)
+        return
+
+    bot_pick = random.choice(list(picks.keys()))
+    win = (p == "바위" and bot_pick == "가위") or (p == "가위" and bot_pick == "보") or (p == "보" and bot_pick == "바위")
+    tie = p == bot_pick
+
+    await add_money(ctx.author.id, -bet)
+    fee = await _casino_fee(ctx.author.id, 0.01)
+
+    if tie:
+        await add_money(ctx.author.id, bet)
+        await _casino_bump(ctx.author.id, bet, 0, "가위바위보")
+        await ctx.reply(f"✂️ {picks[p]} vs {picks[bot_pick]} **비김!** 환급", mention_author=False)
+        return
+
+    if win:
+        payout = int(bet * 2.0 * (1.0 - fee))
+        await add_money(ctx.author.id, payout)
+        net = payout - bet
+        await _casino_bump(ctx.author.id, bet, net, "가위바위보")
+        bal = await get_money(ctx.author.id)
+        await ctx.reply(
+            f"✂️ 너 {picks[p]} vs 봇 {picks[bot_pick]} **승!** +{_fmt_money(net)} / 잔액 {_fmt_money(bal)}",
+            mention_author=False,
+        )
+    else:
+        await _casino_bump(ctx.author.id, bet, -bet, "가위바위보")
+        bal = await get_money(ctx.author.id)
+        await ctx.reply(
+            f"✂️ 너 {picks[p]} vs 봇 {picks[bot_pick]} **패** -{_fmt_money(bet)} / 잔액 {_fmt_money(bal)}",
+            mention_author=False,
+        )
+
+
+@bot.command(name="더블업")
+async def doubleup_cmd(ctx: commands.Context, bet_raw: str | None = None):
+    bet = _parse_bet(bet_raw)
+    if bet is None:
+        await ctx.reply("사용법: `!더블업 <베팅>` — 50% 확률로 2배", mention_author=False)
+        return
+    ok, err = await _casino_guard(ctx, bet)
+    if not ok:
+        if err:
+            await ctx.reply(err, mention_author=False)
+        return
+
+    await add_money(ctx.author.id, -bet)
+    fee = await _casino_fee(ctx.author.id, 0.01)
+    if random.random() < 0.50:
+        payout = int(bet * 2.0 * (1.0 - fee))
+        await add_money(ctx.author.id, payout)
+        net = payout - bet
+        await _casino_bump(ctx.author.id, bet, net, "더블업")
+        bal = await get_money(ctx.author.id)
+        await ctx.reply(f"💎 **더블업 성공!** +{_fmt_money(net)} / 잔액 {_fmt_money(bal)}", mention_author=False)
+    else:
+        await _casino_bump(ctx.author.id, bet, -bet, "더블업")
+        bal = await get_money(ctx.author.id)
+        await ctx.reply(f"💥 **더블업 실패...** -{_fmt_money(bet)} / 잔액 {_fmt_money(bal)}", mention_author=False)
+
+
+@bot.command(name="행운바퀴")
+async def wheel_cmd(ctx: commands.Context, bet_raw: str | None = None):
+    bet = _parse_bet(bet_raw)
+    if bet is None:
+        await ctx.reply("사용법: `!행운바퀴 <베팅>`", mention_author=False)
+        return
+    ok, err = await _casino_guard(ctx, bet)
+    if not ok:
+        if err:
+            await ctx.reply(err, mention_author=False)
+        return
+
+    segments = [
+        (0.0, "💀 꽝", 12),
+        (0.5, "😢 반환", 15),
+        (1.5, "🙂 소승", 25),
+        (2.0, "😄 2배", 22),
+        (3.0, "🔥 3배", 14),
+        (5.0, "⭐ 5배", 8),
+        (10.0, "👑 10배", 4),
+    ]
+    mults, labels, weights = zip(*segments)
+    mult = random.choices(list(mults), weights=list(weights), k=1)[0]
+    label = random.choices(list(labels), weights=list(weights), k=1)[0]
+
+    await add_money(ctx.author.id, -bet)
+    fee = await _casino_fee(ctx.author.id, 0.01)
+    payout = int(bet * mult * (1.0 - fee)) if mult > 0 else 0
+    await add_money(ctx.author.id, payout)
+    net = payout - bet
+    await _casino_bump(ctx.author.id, bet, net, "행운바퀴")
+    bal = await get_money(ctx.author.id)
+    await ctx.reply(
+        f"🎡 행운의 바퀴 → **{label}** (x{mult:g})\n결과 **{_fmt_money(net)}** / 잔액 **{_fmt_money(bal)}**",
+        mention_author=False,
+    )
+
+
+@bot.command(name="블랙잭")
+async def blackjack_cmd(ctx: commands.Context, bet_raw: str | None = None):
+    bet = _parse_bet(bet_raw)
+    if bet is None:
+        await ctx.reply("사용법: `!블랙잭 <베팅>`", mention_author=False)
+        return
+    ok, err = await _casino_guard(ctx, bet)
+    if not ok:
+        if err:
+            await ctx.reply(err, mention_author=False)
+        return
+
+    def card() -> int:
+        return random.randint(1, 10)
+
+    await add_money(ctx.author.id, -bet)
+    p1, p2 = card(), card()
+    d1, d2 = card(), card()
+    ps, ds = p1 + p2, d1 + d2
+
+    if ps <= 16 and random.random() < 0.6:
+        ps += card()
+    if ds <= 16 and random.random() < 0.7:
+        ds += card()
+
+    fee = await _casino_fee(ctx.author.id, 0.01)
+    mult = 0.0
+    if ps > 21:
+        mult = 0.0
+        result = "버스트! 패"
+    elif ds > 21:
+        mult = 2.0
+        result = "딜러 버스트! 승"
+    elif ps > ds:
+        mult = 2.0
+        result = "승"
+    elif ps == ds:
+        await add_money(ctx.author.id, bet)
+        await _casino_bump(ctx.author.id, bet, 0, "블랙잭")
+        await ctx.reply(f"🃏 플레이어 **{ps}** vs 딜러 **{ds}** — **무승부** 환급", mention_author=False)
+        return
+    else:
+        mult = 0.0
+        result = "패"
+
+    if mult > 0:
+        payout = int(bet * mult * (1.0 - fee))
+        await add_money(ctx.author.id, payout)
+        net = payout - bet
+        await _casino_bump(ctx.author.id, bet, net, "블랙잭")
+        bal = await get_money(ctx.author.id)
+        await ctx.reply(
+            f"🃏 **{ps}** vs **{ds}** — {result}\n+{_fmt_money(net)} / 잔액 {_fmt_money(bal)}",
+            mention_author=False,
+        )
+    else:
+        await _casino_bump(ctx.author.id, bet, -bet, "블랙잭")
+        bal = await get_money(ctx.author.id)
+        await ctx.reply(
+            f"🃏 **{ps}** vs **{ds}** — {result}\n-{_fmt_money(bet)} / 잔액 {_fmt_money(bal)}",
+            mention_author=False,
+        )
+
+
+@bot.command(name="보물상자")
+async def treasure_cmd(ctx: commands.Context):
+    if not _channel_allowed(ctx):
+        return
+    now = utc_ts()
+    cd = 30 * 60
+    t = await read_json(TREASURE_PATH, _default_treasure())
+    last = int(t.get(str(ctx.author.id), 0))
+    wait = (last + cd) - now
+    if wait > 0:
+        await ctx.reply(f"보물상자 쿨타임! **{wait // 60}분 {wait % 60}초** 후", mention_author=False)
+        return
+
+    def mut(x):
+        x = dict(x or {})
+        x[str(ctx.author.id)] = now
+        return x
+
+    await update_json(TREASURE_PATH, _default_treasure(), mut)
+
+    roll = random.random()
+    if roll < 0.05:
+        amt = random.randint(80000, 200000)
+        txt = "💎 **대박 보물상자!**"
+    elif roll < 0.25:
+        amt = random.randint(20000, 60000)
+        txt = "✨ **희귀 보물!**"
+    elif roll < 0.55:
+        amt = random.randint(5000, 20000)
+        txt = "📦 **일반 보물**"
+    else:
+        item_roll = random.choice(list(ITEMS.keys()))
+        qty = random.randint(1, 3)
+        await add_fish(ctx.author.id, item_roll, qty)
+        await ctx.reply(
+            f"{txt}\n**{ITEMS[item_roll]['name']}** x{qty} 획득!",
+            mention_author=False,
+        )
+        return
+
+    bal = await add_money(ctx.author.id, amt)
+    await ctx.reply(f"{txt}\n**{_fmt_money(amt)}** 획득! / 잔액: **{_fmt_money(bal)}**", mention_author=False)
 
 
 async def get_max_server_rod_level() -> int:
@@ -1879,7 +2877,13 @@ async def boss_attack_cmd(ctx: commands.Context):
 
     rod_type, rod_level = await get_rod(ctx.author.id)
     dmg, is_crit, crit_mult = _boss_damage(rod_type, rod_level)
-    
+
+    def pm(p):
+        p["boss_hits"] = int(p.get("boss_hits", 0)) + 1
+
+    await profile_update(ctx.author.id, pm)
+    await quest_bump(ctx.author.id, "boss_hit", 1)
+
     # 도감 완성 버프 (전설 도감 완성 시 보스 레이드 데미지 +15% 버프)
     buffs = await get_collection_buffs(ctx.author.id)
     bonus_damage_multiplier = 1.0 + buffs.get("boss_damage_bonus", 0.0)
@@ -1919,6 +2923,430 @@ async def boss_attack_cmd(ctx: commands.Context):
 
     await ctx.send(f"**{ctx.author.display_name}**의 막타로 보스가 쓰러졌다! (피해 {dmg:,}){crit_txt}")
     await _boss_payout(ctx, state)
+
+
+@bot.command(name="프로필")
+async def profile_cmd(ctx: commands.Context):
+    if not _channel_allowed(ctx):
+        return
+    p = await get_profile(ctx.author.id)
+    rod_type, rod_lv = await get_rod(ctx.author.id)
+    title = TITLES.get(p.get("title", "title_rookie"), TITLES["title_rookie"])["name"]
+    ach_cnt = len(p.get("achievements", []))
+    await ctx.reply(
+        f"**👤 {ctx.author.display_name}** 프로필\n"
+        f"- 칭호: **{title}**\n"
+        f"- 낚시대: **{format_rod_name(rod_type, rod_lv)}**\n"
+        f"- 총 낚시: **{p.get('fish_total', 0)}** / 상자: **{p.get('chest_total', 0)}**\n"
+        f"- 이색: **{p.get('shiny_total', 0)}** / 전설: **{p.get('legendary_total', 0)}** / 신화: **{p.get('mythic_total', 0)}**\n"
+        f"- 업적: **{ach_cnt}/{len(ACHIEVEMENTS)}** / 대결승: **{p.get('duel_wins', 0)}**\n"
+        f"- 보유금: **{_fmt_money(await get_money(ctx.author.id))}**",
+        mention_author=False,
+    )
+
+
+@bot.command(name="퀘스트")
+async def quest_cmd(ctx: commands.Context):
+    if not _channel_allowed(ctx):
+        return
+    p = await get_profile(ctx.author.id)
+    day = today_key()
+    if p.get("quest_day") != day or not p.get("daily_quest"):
+        p["quest_day"] = day
+        p["daily_quest"] = pick_daily_quest()
+        p["daily_progress"] = 0
+        p["daily_done"] = False
+        await save_profile(ctx.author.id, p)
+
+    dq = p.get("daily_quest", {})
+    wq = p.get("weekly_quest", WEEKLY_QUEST)
+    lines = [
+        f"**📋 {ctx.author.display_name}** 퀘스트",
+        f"\n**일일** — {dq.get('name', '?')} ({p.get('daily_progress', 0)}/{dq.get('target', 0)})",
+        f"보상: **{_fmt_money(dq.get('reward', 0))}** {'✅완료' if p.get('daily_done') else ''}",
+        f"\n**주간** — {wq.get('name')} ({p.get('weekly_progress', 0)}/{wq.get('target', 0)})",
+        f"보상: **{_fmt_money(wq.get('reward', 0))}** {'✅완료' if p.get('weekly_done') else ''}",
+    ]
+    await ctx.reply("\n".join(lines), mention_author=False)
+
+    if not p.get("daily_done") and int(p.get("daily_progress", 0)) >= int(dq.get("target", 0)):
+        bal = await add_money(ctx.author.id, int(dq.get("reward", 0)))
+        p["daily_done"] = True
+        await save_profile(ctx.author.id, p)
+        await ctx.send(f"🎉 일일 퀘스트 완료! **{_fmt_money(dq.get('reward', 0))}** / 잔액 **{_fmt_money(bal)}**")
+
+    if not p.get("weekly_done") and int(p.get("weekly_progress", 0)) >= int(wq.get("target", 0)):
+        bal = await add_money(ctx.author.id, int(wq.get("reward", 0)))
+        p["weekly_done"] = True
+        await save_profile(ctx.author.id, p)
+        await ctx.send(f"🎉 주간 퀘스트 완료! **{_fmt_money(wq.get('reward', 0))}** / 잔액 **{_fmt_money(bal)}**")
+
+
+@bot.command(name="업적")
+async def achievements_cmd(ctx: commands.Context):
+    if not _channel_allowed(ctx):
+        return
+    p = await get_profile(ctx.author.id)
+    done = set(p.get("achievements", []))
+    lines = [f"**🏆 업적** ({len(done)}/{len(ACHIEVEMENTS)})"]
+    for aid, a in ACHIEVEMENTS.items():
+        mark = "✅" if aid in done else "⬜"
+        lines.append(f"{mark} **{a['name']}** — {a['desc']} (보상 {a['reward']:,}원)")
+    await ctx.reply("\n".join(lines[:20]) + ("\n..." if len(lines) > 20 else ""), mention_author=False)
+
+
+@bot.command(name="칭호")
+async def title_cmd(ctx: commands.Context, title_id: str | None = None):
+    if not _channel_allowed(ctx):
+        return
+    p = await get_profile(ctx.author.id)
+    unlocked = unlocked_titles(p)
+    if not title_id:
+        lines = ["**🎖️ 칭호 목록** (`!칭호 <ID>`로 장착)"]
+        for tid in unlocked:
+            t = TITLES[tid]
+            cur = " ← 현재" if tid == p.get("title") else ""
+            lines.append(f"- `{tid}`: {t['name']}{cur}")
+        await ctx.reply("\n".join(lines), mention_author=False)
+        return
+    title_id = title_id.strip().lower()
+    if title_id not in unlocked:
+        await ctx.reply("아직 해금되지 않은 칭호야.", mention_author=False)
+        return
+    p["title"] = title_id
+    await save_profile(ctx.author.id, p)
+    await ctx.reply(f"칭호 변경: **{TITLES[title_id]['name']}**", mention_author=False)
+
+
+@bot.command(name="날씨")
+async def weather_cmd(ctx: commands.Context):
+    if not _channel_allowed(ctx):
+        return
+    w = await get_weather_state()
+    info = WEATHER_TYPES.get(w.get("id", "sunny"), {})
+    remain = max(0, int(w.get("until", 0)) - utc_ts())
+    await ctx.reply(
+        f"**🌍 서버 날씨**\n"
+        f"- 현재: **{info.get('name', '?')}**\n"
+        f"- 남은 시간: **{remain // 60}분**\n"
+        f"- 효과: 상자+{int(info.get('chest_bonus',0)*100)}% / 희귀+{int(info.get('rarity_bonus',0)*100)}% / 이색+{int(info.get('shiny_bonus',0)*100)}%",
+        mention_author=False,
+    )
+
+
+@bot.command(name="시세")
+async def market_cmd(ctx: commands.Context):
+    if not _channel_allowed(ctx):
+        return
+    m = market_mult_today()
+    import datetime
+    days = ["월", "화", "수", "목", "금", "토", "일"]
+    d = days[datetime.datetime.now().weekday()]
+    emoji = "📈" if m >= 1.1 else ("📉" if m < 1.0 else "➡️")
+    await ctx.reply(
+        f"{emoji} **오늘({d}) 물고기 시세**: **x{m:.2f}**\n"
+        f"`!판매` 시 적용됩니다. 금요일·토요일이 장터일이야!",
+        mention_author=False,
+    )
+
+
+@bot.command(name="뽑기")
+async def gacha_cmd(ctx: commands.Context, count_raw: str | None = None):
+    if not _channel_allowed(ctx):
+        return
+    count = 1
+    if count_raw and count_raw.isdigit():
+        count = min(10, max(1, int(count_raw)))
+    cost = GACHA_COST * count
+    money = await get_money(ctx.author.id)
+    if money < cost:
+        await ctx.reply(f"돈 부족! 필요 **{_fmt_money(cost)}**", mention_author=False)
+        return
+    await add_money(ctx.author.id, -cost)
+
+    lines = [f"**🎁 뽑기 {count}회** (비용 {_fmt_money(cost)})"]
+    for _ in range(count):
+        roll = roll_gacha()
+        t = roll["type"]
+        if t == "money":
+            amt = random.randint(int(roll["min"]), int(roll["max"]))
+            await add_money(ctx.author.id, amt)
+            lines.append(f"- 💰 {amt:,}원")
+        elif t == "item":
+            iid = roll["id"]
+            qty = random.randint(int(roll["min"]), int(roll["max"]))
+            await add_fish(ctx.author.id, iid, qty)
+            lines.append(f"- {ITEMS.get(iid, {}).get('name', iid)} x{qty}")
+        elif t == "chest":
+            cid = roll["id"]
+            qty = random.randint(int(roll["min"]), int(roll["max"]))
+            await add_fish(ctx.author.id, cid, qty)
+            lines.append(f"- {CHESTS[cid]['name']} x{qty}")
+
+    def pm(p):
+        p["gacha_total"] = int(p.get("gacha_total", 0)) + count
+
+    await profile_update(ctx.author.id, pm)
+    await quest_bump(ctx.author.id, "gacha", count)
+    bal = await get_money(ctx.author.id)
+    await ctx.reply("\n".join(lines[:12]) + (f"\n...외 {count-12}줄" if count > 12 else "") + f"\n잔액 **{_fmt_money(bal)}**", mention_author=False)
+
+
+@bot.command(name="수수권")
+async def merchant_cmd(ctx: commands.Context):
+    if not _channel_allowed(ctx):
+        return
+    now = utc_ts()
+    m = await read_json(MERCHANT_PATH, _default_merchant())
+    if int(m.get("until", 0)) <= now:
+        items = generate_mystery_shop()
+        m = {"until": now + 3600, "items": items}
+        await write_json(MERCHANT_PATH, m)
+    lines = ["**🧙 신비한 상인** (1시간마다 갱신)\n구매: `!구매 <아이템ID>`"]
+    for it in m.get("items", []):
+        iid = it["id"]
+        disc = float(it["discount"])
+        price = int(ITEMS[iid]["price"] * disc)
+        lines.append(f"- `{iid}`: {ITEMS[iid]['name']} **{_fmt_money(price)}** (재고 {it.get('stock_left', 0)})")
+    await ctx.reply("\n".join(lines), mention_author=False)
+
+
+@bot.command(name="제작")
+async def craft_cmd(ctx: commands.Context, recipe_id: str | None = None):
+    if not _channel_allowed(ctx):
+        return
+    if not recipe_id or recipe_id not in CRAFT_RECIPES:
+        lines = ["**🔨 제작 레시피** (`!제작 <ID>`)"]
+        for rid, r in CRAFT_RECIPES.items():
+            cost_txt = ", ".join(f"{k} {v}마리" for k, v in r["cost"].items())
+            lines.append(f"- `{rid}`: {r['name']} — {cost_txt} → x{r['yield']}")
+        await ctx.reply("\n".join(lines), mention_author=False)
+        return
+    recipe = CRAFT_RECIPES[recipe_id]
+    inv = await get_inventory(ctx.author.id)
+    for rarity, need in recipe["cost"].items():
+        have = sum(
+            cnt for fid, cnt in inv.items()
+            if (fid in FISH_BY_ID and FISH_BY_ID[fid].rarity == rarity)
+            or (fid.startswith("shiny_") and FISH_BY_ID.get(fid[6:], None) and FISH_BY_ID[fid[6:]].rarity == rarity)
+        )
+        if have < need:
+            await ctx.reply(f"재료 부족! {rarity} 등급 물고기 {need}마리 필요 (보유 환산 {have})", mention_author=False)
+            return
+    left = dict(recipe["cost"])
+    for fid in list(inv.keys()):
+        if left.get("common", 0) <= 0 and left.get("rare", 0) <= 0 and left.get("epic", 0) <= 0 and left.get("legendary", 0) <= 0:
+            break
+        r = None
+        if fid in FISH_BY_ID:
+            r = FISH_BY_ID[fid].rarity
+        elif fid.startswith("shiny_"):
+            f = FISH_BY_ID.get(fid[6:])
+            r = f.rarity if f else None
+        if r and left.get(r, 0) > 0:
+            await add_fish(ctx.author.id, fid, -1)
+            left[r] -= 1
+    await add_fish(ctx.author.id, recipe_id, int(recipe["yield"]))
+    await ctx.reply(f"제작 완료! **{recipe['name']}** x{recipe['yield']}", mention_author=False)
+
+
+@bot.command(name="대결")
+async def duel_cmd(ctx: commands.Context, opponent: discord.Member | None = None, bet_raw: str | None = None):
+    if not _channel_allowed(ctx):
+        return
+    if not opponent or not bet_raw:
+        await ctx.reply("사용법: `!대결 @유저 <베팅>`", mention_author=False)
+        return
+    bet = _parse_bet(bet_raw)
+    if bet is None:
+        return
+    if opponent.bot or opponent.id == ctx.author.id:
+        await ctx.reply("유효한 상대를 멘션해줘.", mention_author=False)
+        return
+    if await get_money(ctx.author.id) < bet:
+        await ctx.reply("돈 부족!", mention_author=False)
+        return
+    if await get_money(opponent.id) < bet:
+        await ctx.reply("상대가 돈이 부족해.", mention_author=False)
+        return
+
+    rarity_score = {"common": 1, "rare": 2, "epic": 4, "legendary": 8, "mythic": 15}
+
+    async def fish_score(uid):
+        rt, lv = await get_rod(uid)
+        w = get_rarity_weights(lv, rt, await get_user_map(uid))
+        r = choose_rarity(w)
+        return rarity_score.get(r, 1) + random.randint(0, lv)
+
+    s1 = await fish_score(ctx.author.id)
+    s2 = await fish_score(opponent.id)
+
+    await add_money(ctx.author.id, -bet)
+    await add_money(opponent.id, -bet)
+
+    if s1 > s2:
+        payout = int(bet * 1.9)
+        await add_money(ctx.author.id, payout)
+        def pm(p):
+            p["duel_wins"] = int(p.get("duel_wins", 0)) + 1
+        await profile_update(ctx.author.id, pm)
+        await ctx.reply(
+            f"⚔️ **{ctx.author.display_name}** {s1} vs **{opponent.display_name}** {s2}\n"
+            f"**승리!** +{_fmt_money(payout - bet)}",
+            mention_author=False,
+        )
+    elif s2 > s1:
+        payout = int(bet * 1.9)
+        await add_money(opponent.id, payout)
+        await ctx.reply(
+            f"⚔️ **{ctx.author.display_name}** {s1} vs **{opponent.display_name}** {s2}\n"
+            f"**패배...**",
+            mention_author=False,
+        )
+    else:
+        await add_money(ctx.author.id, bet)
+        await add_money(opponent.id, bet)
+        await ctx.reply("⚔️ **무승부!** 베팅 환급", mention_author=False)
+
+
+@bot.command(name="낚시랭킹")
+async def fish_rank_cmd(ctx: commands.Context):
+    if not _channel_allowed(ctx):
+        return
+    all_p = await read_json(PROFILE_PATH, _default_profile())
+    wk = week_key()
+    items = []
+    for uid, p in (all_p or {}).items():
+        if (p or {}).get("weekly_key") == wk:
+            try:
+                items.append((int(uid), int(p.get("weekly_fish", 0))))
+            except Exception:
+                pass
+    items.sort(key=lambda x: x[1], reverse=True)
+    top = items[:10]
+    lines = [f"**🎣 주간 낚시 랭킹** ({wk})"]
+    for i, (uid, cnt) in enumerate(top, 1):
+        name = _display_name(ctx, uid)
+        lines.append(f"{i}. **{name}** — {cnt}회")
+    await ctx.reply("\n".join(lines) if top else "아직 데이터 없음", mention_author=False)
+
+
+@bot.command(name="스크래치")
+async def scratch_cmd(ctx: commands.Context, bet_raw: str | None = None):
+    if not _channel_allowed(ctx):
+        return
+    bet = _parse_bet(bet_raw)
+    if bet is None:
+        await ctx.reply("사용법: `!스크래치 <베팅>`", mention_author=False)
+        return
+    ok, err = await _casino_guard(ctx, bet)
+    if not ok:
+        if err:
+            await ctx.reply(err, mention_author=False)
+        return
+    await add_money(ctx.author.id, -bet)
+    grid = [random.randint(1, 9) for _ in range(9)]
+    matches = len(set(grid))
+    mult = {9: 8.0, 8: 3.0, 7: 1.5, 6: 0.8}.get(matches, 0.0)
+    fee = await _casino_fee(ctx.author.id, 0.01)
+    if mult > 0:
+        payout = int(bet * mult * (1 - fee))
+        await add_money(ctx.author.id, payout)
+        net = payout - bet
+        await _casino_bump(ctx.author.id, bet, net, "스크래치")
+        await ctx.reply(
+            f"🎫 스크래치 `{grid[:3]}`...\n고유숫자 {matches}개 → x{mult:g}\n**{_fmt_money(net)}**",
+            mention_author=False,
+        )
+    else:
+        await _casino_bump(ctx.author.id, bet, -bet, "스크래치")
+        await ctx.reply(f"🎫 꽝... `{grid}`", mention_author=False)
+
+
+@bot.command(name="로켓")
+async def rocket_cmd(ctx: commands.Context, bet_raw: str | None = None, target_raw: str | None = None):
+    if not _channel_allowed(ctx):
+        return
+    bet = _parse_bet(bet_raw)
+    if bet is None or not target_raw:
+        await ctx.reply("사용법: `!로켓 <베팅> <목표배율 2~10>` — 터지기 전에 맞추면 성공", mention_author=False)
+        return
+    try:
+        target = float(target_raw)
+    except Exception:
+        await ctx.reply("배율은 2~10 사이 숫자", mention_author=False)
+        return
+    if target < 2 or target > 10:
+        await ctx.reply("배율은 2~10", mention_author=False)
+        return
+    ok, err = await _casino_guard(ctx, bet)
+    if not ok:
+        if err:
+            await ctx.reply(err, mention_author=False)
+        return
+    await add_money(ctx.author.id, -bet)
+    crash = round(random.uniform(1.5, 10.5), 2)
+    fee = await _casino_fee(ctx.author.id, 0.01)
+    if target <= crash:
+        payout = int(bet * target * (1 - fee))
+        await add_money(ctx.author.id, payout)
+        net = payout - bet
+        await _casino_bump(ctx.author.id, bet, net, "로켓")
+        await ctx.reply(f"🚀 로켓 **{crash}x**에서 수익 인출! 목표 {target}x → **+{_fmt_money(net)}**", mention_author=False)
+    else:
+        await _casino_bump(ctx.author.id, bet, -bet, "로켓")
+        await ctx.reply(f"💥 로켓 **{crash}x**에서 터짐! 목표 {target}x 실패", mention_author=False)
+
+
+LOAN_PATH = DATA_DIR / "loan.json"
+
+
+def _default_loan() -> Dict[str, int]:
+    return {}
+
+
+@bot.command(name="대출")
+async def loan_cmd(ctx: commands.Context, amount_raw: str | None = None):
+    if not _channel_allowed(ctx):
+        return
+    if not amount_raw or not amount_raw.isdigit():
+        await ctx.reply("사용법: `!대출 <금액>` (최대 50만)", mention_author=False)
+        return
+    amt = min(500_000, int(amount_raw))
+    loans = await read_json(LOAN_PATH, _default_loan())
+    if int(loans.get(str(ctx.author.id), 0)) > 0:
+        await ctx.reply("이미 대출 중! `!상환` 먼저", mention_author=False)
+        return
+    def mut(d):
+        d = dict(d or {})
+        d[str(ctx.author.id)] = amt
+        return d
+    await update_json(LOAN_PATH, _default_loan(), mut)
+    bal = await add_money(ctx.author.id, amt)
+    await ctx.reply(f"🏦 대출 **{_fmt_money(amt)}** (상환액 **{_fmt_money(int(amt*1.1))}**) / 잔액 **{_fmt_money(bal)}**", mention_author=False)
+
+
+@bot.command(name="상환")
+async def repay_cmd(ctx: commands.Context):
+    if not _channel_allowed(ctx):
+        return
+    loans = await read_json(LOAN_PATH, _default_loan())
+    owed = int(loans.get(str(ctx.author.id), 0))
+    if owed <= 0:
+        await ctx.reply("대출 없음", mention_author=False)
+        return
+    repay = int(owed * 1.1)
+    money = await get_money(ctx.author.id)
+    if money < repay:
+        await ctx.reply(f"상환 부족! 필요 **{_fmt_money(repay)}**", mention_author=False)
+        return
+    await add_money(ctx.author.id, -repay)
+    def mut(d):
+        d = dict(d or {})
+        d.pop(str(ctx.author.id), None)
+        return d
+    await update_json(LOAN_PATH, _default_loan(), mut)
+    await ctx.reply(f"✅ 대출 상환 완료! **{_fmt_money(repay)}**", mention_author=False)
 
 
 def main() -> None:

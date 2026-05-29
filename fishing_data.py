@@ -81,31 +81,382 @@ FISH_TABLE: List[Fish] = [
     Fish("cosmic_anchor", "우주의 닻", "mythic", 160000),
     Fish("ocean_god_eye", "바다신의 눈", "mythic", 200000),
     Fish("black_tide_core", "검은 조류의 핵", "mythic", 260000),
+    Fish("neon_tetra", "네온 테트라", "common", 38),
+    Fish("rockfish", "우럭", "common", 68),
+    Fish("abalone", "전복", "common", 120),
+    Fish("horse_mackerel", "전갱이", "common", 48),
+    Fish("flounder", "도다리", "common", 90),
+    Fish("rainbow_trout", "무지개송어", "rare", 240),
+    Fish("king_crab", "킹크랩", "rare", 580),
+    Fish("moray_eel", "곰치", "rare", 440),
+    Fish("sawshark", "톱상어", "rare", 490),
+    Fish("nautilus", "앵무조개", "rare", 350),
+    Fish("ghost_shark", "유령상어", "epic", 1900),
+    Fish("sunfish", "개복치", "epic", 2300),
+    Fish("oarfish", "산갈치", "epic", 2800),
+    Fish("vampire_squid", "흡혈오징어", "epic", 2500),
+    Fish("emperor_fish", "황제어", "legendary", 24000),
+    Fish("kraken_tentacle", "크라켄 촉수", "legendary", 35000),
+    Fish("starlight_whale", "별빛 고래", "legendary", 42000),
+    Fish("chaos_shark", "혼돈의 상어", "mythic", 180000),
+    Fish("eternal_coral", "영원의 산호", "mythic", 220000),
+    Fish("genesis_fish", "태초의 물고기", "mythic", 350000),
 ]
+
+
+ROD_PASSIVE_DESC: Dict[str, str] = {
+    "none": "기본형",
+    "rarity_bonus": "희귀도 ↑",
+    "cooldown_bonus": "쿨타임 ↓",
+    "boss_bonus": "보스 피해 ↑",
+    "crit_bonus": "보스 크리 ↑",
+    "sell_bonus": "판매가 ↑",
+    "combo": "복합 특성",
+}
 
 
 RODS: Dict[str, dict] = {
     "rookie": {
-        "name": "초보 낚시대",
+        "name": "🐟 초보 낚시대",
         "price": 0,
+        "req_level": 0,
         "passive": {"type": "none"},
     },
+    "bamboo": {
+        "name": "🎋 대나무 낚시대",
+        "price": 8000,
+        "req_level": 0,
+        "passive": {"type": "cooldown_bonus", "value": 0.08},
+    },
     "flame": {
-        "name": "화염 낚시대",
+        "name": "🔥 화염 낚시대",
         "price": 25000,
+        "req_level": 3,
         "passive": {"type": "rarity_bonus", "value": 0.15},
     },
     "thunder": {
-        "name": "번개 낚시대",
+        "name": "⚡ 번개 낚시대",
         "price": 35000,
-        "passive": {"type": "cooldown_bonus", "value": 0.15},
+        "req_level": 5,
+        "passive": {"type": "cooldown_bonus", "value": 0.18},
     },
     "deepsea": {
-        "name": "심해 낚시대",
+        "name": "🌊 심해 낚시대",
         "price": 50000,
+        "req_level": 7,
         "passive": {"type": "boss_bonus", "value": 0.20},
     },
+    "frost": {
+        "name": "❄️ 빙하 낚시대",
+        "price": 120000,
+        "req_level": 10,
+        "passive": {"type": "combo", "rarity": 0.10, "cooldown": 0.10},
+    },
+    "dragon": {
+        "name": "🐉 용암 낚시대",
+        "price": 200000,
+        "req_level": 12,
+        "passive": {"type": "combo", "boss": 0.25, "crit": 0.05},
+    },
+    "phantom": {
+        "name": "👻 유령 낚시대",
+        "price": 350000,
+        "req_level": 15,
+        "passive": {"type": "crit_bonus", "value": 0.12},
+    },
+    "golden": {
+        "name": "✨ 황금 낚시대",
+        "price": 500000,
+        "req_level": 18,
+        "passive": {"type": "sell_bonus", "value": 0.25},
+    },
+    "cosmic_rod": {
+        "name": "🌌 코스믹 낚시대",
+        "price": 800000,
+        "req_level": 20,
+        "passive": {"type": "combo", "rarity": 0.18, "boss": 0.15},
+    },
+    "leviathan": {
+        "name": "☄️ 레비아탄 낚시대",
+        "price": 1500000,
+        "req_level": 22,
+        "passive": {"type": "combo", "boss": 0.30, "crit": 0.10, "rarity": 0.12},
+    },
 }
+
+
+def rod_passive_text(rod_id: str) -> str:
+    rod = RODS.get(rod_id) or RODS["rookie"]
+    p = rod.get("passive", {})
+    t = p.get("type", "none")
+    if t == "none":
+        return ROD_PASSIVE_DESC["none"]
+    if t == "combo":
+        parts = []
+        if "rarity" in p:
+            parts.append(f"희귀+{int(p['rarity']*100)}%")
+        if "cooldown" in p:
+            parts.append(f"쿨-{int(p['cooldown']*100)}%")
+        if "boss" in p:
+            parts.append(f"보스+{int(p['boss']*100)}%")
+        if "crit" in p:
+            parts.append(f"크리+{int(p['crit']*100)}%p")
+        return " / ".join(parts) if parts else "복합"
+    v = p.get("value", 0)
+    return f"{ROD_PASSIVE_DESC.get(t, t)} {int(v*100)}%"
+
+
+def spin_slot() -> Tuple[str, str, str, float, bool, str]:
+    """슬롯 1회. 반환: (a,b,c, 배당배수, 잭팟여부, 결과라벨)"""
+    symbols = ["🍒", "🍋", "🍇", "🔔", "⭐", "7️⃣"]
+    weights = [20, 18, 17, 16, 15, 14]
+    a, b, c = random.choices(symbols, weights=weights, k=3)
+
+    payout_mult = 0.0
+    label = "꽝"
+    jackpot_hit = False
+
+    if a == b == c == "7️⃣":
+        payout_mult = 18.0
+        jackpot_hit = True
+        label = "💥 잭팟 7"
+    elif a == b == c == "⭐":
+        payout_mult = 7.0
+        label = "⭐ 3연속"
+    elif a == b == c == "🔔":
+        payout_mult = 5.0
+        label = "🔔 3연속"
+    elif a == b == c:
+        payout_mult = 3.0
+        label = f"{a} 3연속"
+    elif (a == b == "7️⃣") or (a == c == "7️⃣") or (b == c == "7️⃣"):
+        payout_mult = 3.5
+        label = "7️⃣ 더블"
+    elif len({a, b, c}) == 2:
+        payout_mult = 1.85
+        label = "2매칭"
+    elif "🍒" in (a, b, c):
+        payout_mult = 0.85
+        label = "🍒 체리 터치"
+    elif "⭐" in (a, b, c):
+        payout_mult = 0.45
+        label = "⭐ 스타 터치"
+
+    return a, b, c, payout_mult, jackpot_hit, label
+
+
+SLOT_WIN_FEE = 0.005
+SLOT_JACKPOT_RATE = 0.015
+
+
+# ── 낚시 보물 상자 ──────────────────────────────────────────
+CHESTS: Dict[str, dict] = {
+    "chest_wood": {
+        "name": "🪵 나무 보물상자",
+        "desc": "초보가 자주 낚는 상자",
+        "rewards": [
+            {"chance": 0.35, "type": "money", "min": 800, "max": 4000},
+            {"chance": 0.30, "type": "item", "id": "bait_worm", "min": 1, "max": 4},
+            {"chance": 0.25, "type": "fish_rarity", "rarity": "common", "min": 1, "max": 3},
+            {"chance": 0.08, "type": "item", "id": "bait_shrimp", "min": 1, "max": 1},
+            {"chance": 0.02, "type": "item", "id": "treasure_pearl", "min": 1, "max": 1},
+        ],
+    },
+    "chest_silver": {
+        "name": "🥈 은 보물상자",
+        "desc": "괜찮은 전리품",
+        "rewards": [
+            {"chance": 0.28, "type": "money", "min": 4000, "max": 15000},
+            {"chance": 0.22, "type": "item", "id": "bait_shrimp", "min": 1, "max": 3},
+            {"chance": 0.20, "type": "fish_rarity", "rarity": "rare", "min": 1, "max": 2},
+            {"chance": 0.15, "type": "item", "id": "bait_gold", "min": 1, "max": 1},
+            {"chance": 0.10, "type": "money", "min": 20000, "max": 35000},
+            {"chance": 0.03, "type": "item", "id": "scroll_protect", "min": 1, "max": 1},
+            {"chance": 0.02, "type": "item", "id": "lucky_coin", "min": 1, "max": 1},
+        ],
+    },
+    "chest_gold": {
+        "name": "🥇 금 보물상자",
+        "desc": "빛나는 보물",
+        "rewards": [
+            {"chance": 0.22, "type": "money", "min": 15000, "max": 50000},
+            {"chance": 0.20, "type": "item", "id": "bait_gold", "min": 1, "max": 2},
+            {"chance": 0.18, "type": "fish_rarity", "rarity": "epic", "min": 1, "max": 1},
+            {"chance": 0.15, "type": "fish_rarity", "rarity": "legendary", "min": 1, "max": 1},
+            {"chance": 0.12, "type": "money", "min": 50000, "max": 90000},
+            {"chance": 0.08, "type": "item", "id": "scroll_protect", "min": 1, "max": 1},
+            {"chance": 0.03, "type": "item", "id": "mystic_shard", "min": 1, "max": 1},
+            {"chance": 0.02, "type": "chest", "id": "chest_abyss", "min": 1, "max": 1},
+        ],
+    },
+    "chest_abyss": {
+        "name": "🌑 심연 보물상자",
+        "desc": "심해에서 떠오른 상자",
+        "rewards": [
+            {"chance": 0.20, "type": "money", "min": 40000, "max": 120000},
+            {"chance": 0.18, "type": "fish_rarity", "rarity": "legendary", "min": 1, "max": 2},
+            {"chance": 0.15, "type": "item", "id": "scroll_protect", "min": 1, "max": 2},
+            {"chance": 0.15, "type": "item", "id": "bait_gold", "min": 2, "max": 4},
+            {"chance": 0.12, "type": "fish_rarity", "rarity": "mythic", "min": 1, "max": 1},
+            {"chance": 0.10, "type": "money", "min": 100000, "max": 200000},
+            {"chance": 0.05, "type": "item", "id": "mystic_shard", "min": 1, "max": 2},
+            {"chance": 0.03, "type": "item", "id": "ancient_relic", "min": 1, "max": 1},
+            {"chance": 0.02, "type": "chest", "id": "chest_cosmic", "min": 1, "max": 1},
+        ],
+    },
+    "chest_cosmic": {
+        "name": "🌌 코스믹 보물상자",
+        "desc": "우주의 기운이 느껴진다",
+        "rewards": [
+            {"chance": 0.18, "type": "money", "min": 80000, "max": 250000},
+            {"chance": 0.17, "type": "fish_rarity", "rarity": "mythic", "min": 1, "max": 2},
+            {"chance": 0.15, "type": "item", "id": "scroll_protect", "min": 2, "max": 3},
+            {"chance": 0.14, "type": "fish_rarity", "rarity": "legendary", "min": 2, "max": 3},
+            {"chance": 0.12, "type": "money", "min": 200000, "max": 400000},
+            {"chance": 0.10, "type": "item", "id": "mystic_shard", "min": 1, "max": 3},
+            {"chance": 0.08, "type": "item", "id": "ancient_relic", "min": 1, "max": 1},
+            {"chance": 0.03, "type": "item", "id": "divine_scale", "min": 1, "max": 1},
+            {"chance": 0.03, "type": "chest", "id": "chest_divine", "min": 1, "max": 1},
+        ],
+    },
+    "chest_divine": {
+        "name": "👑 신성 보물상자",
+        "desc": "전설급 보물만 담긴 상자",
+        "rewards": [
+            {"chance": 0.20, "type": "money", "min": 150000, "max": 500000},
+            {"chance": 0.18, "type": "fish_rarity", "rarity": "mythic", "min": 1, "max": 3},
+            {"chance": 0.15, "type": "item", "id": "scroll_protect", "min": 2, "max": 5},
+            {"chance": 0.12, "type": "money", "min": 500000, "max": 1000000},
+            {"chance": 0.10, "type": "item", "id": "divine_scale", "min": 1, "max": 1},
+            {"chance": 0.10, "type": "item", "id": "ancient_relic", "min": 1, "max": 2},
+            {"chance": 0.08, "type": "item", "id": "mystic_shard", "min": 2, "max": 5},
+            {"chance": 0.05, "type": "item", "id": "lucky_coin", "min": 3, "max": 5},
+            {"chance": 0.02, "type": "money", "min": 1000000, "max": 2000000},
+        ],
+    },
+}
+
+
+def _roll_chest_tier(rod_level: int, map_id: str) -> str:
+    map_bonus = {"river": 0, "ocean": 1, "abyss": 2, "cosmic": 3}.get(map_id, 0)
+    tiers: List[Tuple[str, int]] = [
+        ("chest_wood", 42),
+        ("chest_silver", 30),
+        ("chest_gold", 16),
+        ("chest_abyss", 8),
+        ("chest_cosmic", 3),
+        ("chest_divine", 1),
+    ]
+    if rod_level < 5:
+        tiers = tiers[:2]
+    elif rod_level < 10:
+        tiers = tiers[:3]
+    elif rod_level < 15:
+        tiers = tiers[:4]
+    elif rod_level < 20:
+        tiers = tiers[:5]
+
+    if map_bonus >= 2:
+        tiers = [(k, w + (3 if "abyss" in k or "cosmic" in k else 0)) for k, w in tiers]
+    if map_bonus >= 3:
+        tiers = [(k, w + (5 if k == "chest_divine" else 0)) for k, w in tiers]
+
+    ids, weights = zip(*tiers)
+    return random.choices(list(ids), weights=list(weights), k=1)[0]
+
+
+def roll_fishing_catch(
+    rod_level: int,
+    rod_type: str,
+    map_id: str = "river",
+    active_bait: str | None = None,
+    extra_chest_chance: float = 0.0,
+    extra_rarity_boost: float = 0.0,
+) -> Tuple[str, object]:
+    """반환: ('fish', Fish) 또는 ('chest', chest_id)"""
+    map_bonus = {"river": 0.0, "ocean": 0.02, "abyss": 0.05, "cosmic": 0.08}.get(map_id, 0.0)
+    chest_chance = 0.16 + min(0.12, rod_level * 0.004) + map_bonus + float(extra_chest_chance)
+
+    if random.random() < chest_chance:
+        return "chest", _roll_chest_tier(rod_level, map_id)
+
+    weights = get_rarity_weights(rod_level, rod_type, map_id, active_bait)
+    if extra_rarity_boost > 0:
+        take = clamp(weights["common"] * extra_rarity_boost, 0.0, weights["common"] - 0.05)
+        weights = dict(weights)
+        weights["common"] -= take
+        weights["rare"] += take * 0.4
+        weights["epic"] += take * 0.35
+        weights["legendary"] += take * 0.2
+        weights["mythic"] += take * 0.05
+        s = sum(weights.values())
+        for k in weights:
+            weights[k] /= s
+    rarity = choose_rarity(weights)
+    return "fish", choose_fish(rarity)
+
+
+def _pick_chest_reward(chest_id: str) -> dict:
+    """상자 1개 개봉 보상 1종 + 30% 확률로 보너스 소액"""
+    chest = CHESTS[chest_id]
+    pool = chest["rewards"]
+    roll = random.random()
+    acc = 0.0
+    chosen = pool[-1]
+    for entry in pool:
+        acc += float(entry["chance"])
+        if roll <= acc:
+            chosen = entry
+            break
+
+    result: dict = {"money": 0, "items": {}, "fish": {}, "lines": []}
+
+    def _apply(entry: dict) -> None:
+        t = entry["type"]
+        if t == "money":
+            amt = random.randint(int(entry["min"]), int(entry["max"]))
+            result["money"] += amt
+            result["lines"].append(f"💰 **{amt:,}원**")
+        elif t == "item":
+            iid = entry["id"]
+            qty = random.randint(int(entry["min"]), int(entry["max"]))
+            result["items"][iid] = result["items"].get(iid, 0) + qty
+            iname = ITEMS.get(iid, {}).get("name", iid)
+            result["lines"].append(f"📦 {iname} x{qty}")
+        elif t == "fish_rarity":
+            rarity = entry["rarity"]
+            pool_f = [f for f in FISH_TABLE if f.rarity == rarity]
+            if pool_f:
+                f = random.choice(pool_f)
+                qty = random.randint(int(entry["min"]), int(entry["max"]))
+                result["fish"][f.id] = result["fish"].get(f.id, 0) + qty
+                result["lines"].append(f"🐟 **{f.name}** x{qty}")
+        elif t == "chest":
+            cid = entry["id"]
+            qty = random.randint(int(entry["min"]), int(entry["max"]))
+            result["items"][cid] = result["items"].get(cid, 0) + qty
+            cname = CHESTS.get(cid, {}).get("name", cid)
+            result["lines"].append(f"📦 **{cname}** x{qty} (중첩 획득!)")
+
+    _apply(chosen)
+    if random.random() < 0.30:
+        bonus = random.randint(500, 3000)
+        result["money"] += bonus
+        result["lines"].append(f"✨ 보너스 **{bonus:,}원**")
+    return result
+
+
+def open_chest(chest_id: str) -> dict:
+    if chest_id not in CHESTS:
+        return {"money": 0, "items": {}, "fish": {}, "lines": ["알 수 없는 상자"]}
+    return _pick_chest_reward(chest_id)
+
+
+def format_chest_drop(chest_id: str) -> str:
+    c = CHESTS.get(chest_id)
+    if not c:
+        return f"📦 보물상자 ({chest_id})"
+    return f"📦 **보물상자 등장!** {c['name']}\n`!상자깨기 {chest_id}` 또는 `!상자깨기 all`"
 
 
 MAPS: Dict[str, dict] = {
@@ -196,7 +547,37 @@ ITEMS: Dict[str, dict] = {
         "type": "scroll",
         "effect_type": "protect",
         "effect_value": 0.0
-    }
+    },
+    "treasure_pearl": {
+        "name": "💠 보물 진주",
+        "price": 80000,
+        "desc": "상자에서 나온 희귀 진주. 판매하거나 보관.",
+        "type": "treasure",
+    },
+    "lucky_coin": {
+        "name": "🪙 행운의 주화",
+        "price": 50000,
+        "desc": "카지노 수수료 50% 감소 (다음 1회, `!주화`로 활성화)",
+        "type": "treasure",
+    },
+    "mystic_shard": {
+        "name": "🔮 신비의 파편",
+        "price": 150000,
+        "desc": "고대 마력이 깃든 파편. 매우 비싸게 판매 가능.",
+        "type": "treasure",
+    },
+    "ancient_relic": {
+        "name": "🏺 고대 유물",
+        "price": 300000,
+        "desc": "심해 유적에서 발굴된 전설급 유물.",
+        "type": "treasure",
+    },
+    "divine_scale": {
+        "name": "🐲 신룡의 비늘",
+        "price": 800000,
+        "desc": "신화급 재료. 획득 확률 1~3%.",
+        "type": "treasure",
+    },
 }
 
 
@@ -303,14 +684,21 @@ def get_rarity_weights(rod_level: int, rod_type: str, map_id: str = "river", act
         base["rare"] += (steal_from_common - bonus_leg) * 0.45
 
     passive = (RODS.get(rod_type) or RODS["rookie"])["passive"]
-    if passive.get("type") == "rarity_bonus":
-        boost = float(passive.get("value", 0.0))
+    ptype = passive.get("type", "none")
+
+    def _apply_rarity_boost(boost: float) -> None:
+        nonlocal base
         take = clamp(base["common"] * boost, 0.0, base["common"] - 0.05)
         base["common"] -= take
         base["rare"] += take * 0.55
         base["epic"] += take * 0.30
         base["legendary"] += take * 0.13
         base["mythic"] += take * 0.02
+
+    if ptype == "rarity_bonus":
+        _apply_rarity_boost(float(passive.get("value", 0.0)))
+    elif ptype == "combo" and passive.get("rarity"):
+        _apply_rarity_boost(float(passive["rarity"]))
 
     if active_bait:
         if active_bait == "bait_shrimp":
