@@ -86,6 +86,24 @@ from game_fun import (
     streak_extra_reward,
     tournament_weekend_key,
 )
+from game_casino_abyss import (
+    ABYSS_MAX_BET,
+    ABYSS_MIN_BET,
+    ABYSS_POT_RATE,
+    ABYSS_POT_JACKPOT_CHANCE,
+    calc_payout,
+    default_abyss_pot,
+    odds_table_text,
+    roll_abyss,
+)
+from game_estate import (
+    ESTATE_CATALOG,
+    SELL_BACK_RATE,
+    estate_list_line,
+    fmt_estate_price,
+    pending_rent,
+    resolve_estate,
+)
 from game_stocks import (
     STOCKS,
     STOCK_TICK_SECONDS,
@@ -150,6 +168,8 @@ FUN_PATH = DATA_DIR / "fun.json"
 STOCK_MARKET_PATH = DATA_DIR / "stock_market.json"
 STOCK_PORTFOLIO_PATH = DATA_DIR / "stock_portfolio.json"
 STOCK_NEWS_PATH = DATA_DIR / "stock_news.json"
+ESTATE_PATH = DATA_DIR / "estate.json"
+ABYSS_JACKPOT_PATH = DATA_DIR / "abyss_jackpot.json"
 
 QUIZ_PENDING: Dict[int, dict] = {}
 
@@ -471,18 +491,73 @@ async def add_fish(user_id: int, fish_id: str, amount: int = 1) -> None:
     await update_json(INV_PATH, _default_inventory(), mut)
 
 
-async def get_inventory(user_id: int) -> Dict[str, int]:
-    inv = await read_json(INV_PATH, _default_inventory())
-    raw = inv.get(str(user_id), {})
-    if not isinstance(raw, dict):
-        return {}
+def _normalize_inventory_raw(raw) -> Dict[str, int]:
+    """구형/깨진 인벤 데이터도 읽을 수 있게 정규화."""
     out: Dict[str, int] = {}
+    if raw is None:
+        return out
+    if isinstance(raw, list):
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            k = item.get("id") or item.get("key") or item.get("fish_id")
+            if not k:
+                continue
+            try:
+                q = int(item.get("qty", item.get("count", item.get("amount", 1))))
+            except Exception:
+                continue
+            if q > 0:
+                out[str(k)] = out.get(str(k), 0) + q
+        return {k: v for k, v in out.items() if v > 0}
+    if not isinstance(raw, dict):
+        return out
     for k, v in raw.items():
+        key = str(k)
         try:
-            out[str(k)] = max(0, int(v))
+            if isinstance(v, dict):
+                q = int(v.get("qty", v.get("count", v.get("amount", 0))))
+            elif isinstance(v, (list, tuple)):
+                continue
+            else:
+                q = int(float(v))
+            if q > 0:
+                out[key] = q
         except Exception:
             continue
-    return {k: v for k, v in out.items() if v > 0}
+    return out
+
+
+async def get_inventory(user_id: int) -> Dict[str, int]:
+    inv = await read_json(INV_PATH, _default_inventory())
+    uid = str(user_id)
+    raw = inv.get(uid)
+    if raw is None and user_id in inv:
+        raw = inv.get(user_id)
+    return _normalize_inventory_raw(raw)
+
+
+async def _reply_long(ctx: commands.Context, parts: list[str], header: str = "") -> None:
+    """디스코드 2000자 제한 대응 분할 전송."""
+    limit = 1900
+    chunks: list[str] = []
+    buf = header
+    for part in parts:
+        line = part if part.endswith("\n") else part + "\n"
+        if len(buf) + len(line) > limit and buf.strip():
+            chunks.append(buf.rstrip())
+            buf = line
+        else:
+            buf += line
+    if buf.strip():
+        chunks.append(buf.rstrip())
+    if not chunks:
+        chunks = [header or "(내용 없음)"]
+    for i, text in enumerate(chunks):
+        if i == 0:
+            await ctx.reply(text, mention_author=False)
+        else:
+            await ctx.send(text)
 
 
 async def get_last_fish_ts(user_id: int) -> int:
@@ -824,7 +899,7 @@ async def _casino_guard(ctx: commands.Context, bet: int) -> tuple[bool, str | No
         return False, None
 
     CASINO_CD_SECONDS = 5
-    CASINO_MAX_BET = 250_000
+    CASINO_MAX_BET = 500_000
 
     if bet <= 0:
         return False, "베팅은 1원 이상만 가능해."
@@ -1263,6 +1338,21 @@ def _channel_allowed(ctx: commands.Context) -> bool:
 
 
 @bot.event
+async def on_command_error(ctx: commands.Context, error: Exception):
+    if isinstance(error, commands.CommandNotFound):
+        return
+    if isinstance(error, commands.CheckFailure):
+        return
+    orig = getattr(error, "original", error)
+    name = getattr(ctx.command, "name", "?")
+    await ctx.reply(
+        f"⚠️ `!{name}` 처리 중 오류가 발생했어. 잠시 후 다시 시도해줘.\n"
+        f"({type(orig).__name__})",
+        mention_author=False,
+    )
+
+
+@bot.event
 async def on_ready():
     ensure_dir(DATA_DIR)
     print(f"Logged in as {bot.user} (id={bot.user.id})")
@@ -1326,6 +1416,8 @@ async def help_cmd(ctx: commands.Context):
         "- `!행운바퀴 <베팅>` 룰렛형 행운의 바퀴\n"
         "- `!블랙잭 <베팅>` 간이 블랙잭\n"
         "- `!주화` 행운의 주화 사용 (카지노 수수료 50%↓ 1회)\n"
+        "- `!심연 <베팅>` ☄️ 미친 도박 (최대 **2000배**, 확률 극低)\n"
+        "- `!심연확률` / `!심연잭팟` 심연 확률·잭팟 풀\n"
         "\n"
         "**📦 보물상자 (낚시 드롭)**\n"
         "- `!상자` 보유 상자 목록\n"
@@ -1368,6 +1460,13 @@ async def help_cmd(ctx: commands.Context):
         "- `!주식보유` 내 보유 주식·평가액\n"
         "- `!주식시세 <종목>` 종목 상세\n"
         "- `!주식속보` 최근 [속보] 뉴스 (하루 2회 자동 발표)\n"
+        "\n"
+        "**🏘️ 부동산**\n"
+        "- `!부동산` 매물 목록 (1억~20억)\n"
+        "- `!부동산구매 <ID>` 구매\n"
+        "- `!부동산보유` 내 부동산\n"
+        "- `!월세수령` 누적 월세 수령 (1시간마다 적립)\n"
+        "- `!부동산매도 <ID>` 매도 (매입가 70%)\n"
     )
     await ctx.reply(msg, mention_author=False)
 
@@ -1789,64 +1888,89 @@ async def auto_fish_cmd(ctx: commands.Context):
 async def inv_cmd(ctx: commands.Context):
     if not _channel_allowed(ctx):
         return
-    inv = await get_inventory(ctx.author.id)
-    if not inv:
-        await ctx.reply("인벤토리가 비었어. `!낚시`로 시작해봐.", mention_author=False)
-        return
+    try:
+        inv = await get_inventory(ctx.author.id)
+        if not inv:
+            await ctx.reply("인벤토리가 비었어. `!낚시`로 시작해봐.", mention_author=False)
+            return
 
-    fish_lines = []
-    item_lines = []
-    
-    total_items = 0
-    total_value = 0
-    
-    mkt = market_mult_today()
-    for item_key, cnt in sorted(inv.items(), key=lambda kv: (-kv[1], kv[0])):
-        if item_key in FISH_BY_ID or item_key.startswith("shiny_"):
-            sp = _fish_sell_price(item_key)
-            total_items += cnt
-            total_value += int(sp * mkt * cnt)
-            fish_lines.append(f"- {_inv_item_display(item_key)} x{cnt} (개당 {int(sp*mkt):,}원)")
-        elif item_key in CHESTS:
-            info = CHESTS[item_key]
-            item_lines.append(f"- {info['name']} x{cnt} (`!상자깨기 {item_key}`)")
-        elif item_key in ITEMS:
-            info = ITEMS[item_key]
-            price = int(info.get("price", 0))
-            sell_hint = f" / 판매 {price:,}원" if price > 0 else ""
-            item_lines.append(f"- {info['name']} x{cnt}{sell_hint}")
+        fish_lines = []
+        item_lines = []
+        unknown_lines = []
 
-    lines = [f"**🎒 {ctx.author.display_name}**의 인벤토리\n"]
-    
-    if fish_lines:
-        lines.append("**🐟 물고기**")
-        lines.extend(fish_lines)
-        lines.append(f"합계: **{total_items}개** / 예상 판매가: **{_fmt_money(total_value)}**")
-    else:
-        lines.append("🐟 *물고기 보관함이 비어있습니다.*")
-        
-    chest_lines = [l for l in item_lines if "상자깨기" in l]
-    other_items = [l for l in item_lines if "상자깨기" not in l]
-    if chest_lines:
-        lines.append("\n**📦 보물상자**")
-        lines.extend(chest_lines)
-    if other_items:
-        lines.append("\n**🎒 소모품·재료**")
-        lines.extend(other_items)
-        
-    # 현재 장착 중인 미끼 표시
-    bait = await get_user_bait(ctx.author.id)
-    if bait:
-        qty = int(inv.get(bait, 0))
-        lines.append(
-            f"\n🎣 **현재 장착 미끼**: {ITEMS[bait]['name']} (보유 **{qty}개**, 낚시 시 1개 소모)"
+        total_items = 0
+        total_value = 0
+
+        mkt = market_mult_today()
+        for item_key, cnt in sorted(inv.items(), key=lambda kv: (-int(kv[1]), str(kv[0]))):
+            try:
+                cnt = int(cnt)
+            except Exception:
+                continue
+            if cnt <= 0:
+                continue
+            if item_key in FISH_BY_ID or (
+                isinstance(item_key, str) and item_key.startswith("shiny_")
+            ):
+                sp = _fish_sell_price(item_key)
+                total_items += cnt
+                total_value += int(sp * mkt * cnt)
+                fish_lines.append(
+                    f"- {_inv_item_display(item_key)} x{cnt} (개당 {int(sp * mkt):,}원)"
+                )
+            elif item_key in CHESTS:
+                info = CHESTS[item_key]
+                item_lines.append(f"- {info['name']} x{cnt} (`!상자깨기 {item_key}`)")
+            elif item_key in ITEMS:
+                info = ITEMS[item_key]
+                price = int(info.get("price", 0))
+                sell_hint = f" / 판매 {price:,}원" if price > 0 else ""
+                item_lines.append(f"- {info['name']} x{cnt}{sell_hint}")
+            else:
+                unknown_lines.append(f"- `{item_key}` x{cnt}")
+
+        parts = [f"**🎒 {ctx.author.display_name}**의 인벤토리"]
+
+        if fish_lines:
+            parts.append("**🐟 물고기**")
+            parts.extend(fish_lines)
+            parts.append(
+                f"합계: **{total_items}개** / 예상 판매가: **{_fmt_money(total_value)}**"
+            )
+        else:
+            parts.append("🐟 *물고기 보관함이 비어있습니다.*")
+
+        chest_lines = [l for l in item_lines if "상자깨기" in l]
+        other_items = [l for l in item_lines if "상자깨기" not in l]
+        if chest_lines:
+            parts.append("**📦 보물상자**")
+            parts.extend(chest_lines)
+        if other_items:
+            parts.append("**🎒 소모품·재료**")
+            parts.extend(other_items)
+        if unknown_lines:
+            parts.append("**❓ 기타**")
+            parts.extend(unknown_lines[:30])
+            if len(unknown_lines) > 30:
+                parts.append(f"... 외 {len(unknown_lines) - 30}종")
+
+        bait = await get_user_bait(ctx.author.id)
+        if bait and bait in ITEMS:
+            qty = int(inv.get(bait, 0))
+            parts.append(
+                f"🎣 **장착 미끼**: {ITEMS[bait]['name']} (보유 **{qty}개**)"
+            )
+
+        map_id = await get_user_map(ctx.author.id)
+        parts.append(f"📍 **낚시터**: {MAPS.get(map_id, MAPS['river'])['name']}")
+
+        await _reply_long(ctx, parts)
+    except Exception:
+        await ctx.reply(
+            "인벤을 불러오는 중 오류가 났어. 잠시 후 다시 시도해줘.\n"
+            "(아이템이 너무 많으면 관리자에게 문의)",
+            mention_author=False,
         )
-        
-    # 현재 위치한 낚시터 표시
-    map_id = await get_user_map(ctx.author.id)
-    lines.append(f"📍 **현재 위치**: {MAPS.get(map_id, MAPS['river'])['name']}")
-
-    await ctx.reply("\n".join(lines), mention_author=False)
 
 
 @bot.command(name="판매")
@@ -2752,6 +2876,151 @@ async def rps_cmd(ctx: commands.Context, bet_raw: str | None = None, pick_raw: s
             f"✂️ 너 {picks[p]} vs 봇 {picks[bot_pick]} **패** -{_fmt_money(bet)} / 잔액 {_fmt_money(bal)}",
             mention_author=False,
         )
+
+
+async def _abyss_pot_read() -> int:
+    j = await read_json(ABYSS_JACKPOT_PATH, default_abyss_pot())
+    return int((j or {}).get("pot", 0))
+
+
+async def _abyss_pot_add(delta: int) -> int:
+    def mut(d):
+        d = dict(d or {})
+        d["pot"] = max(0, int(d.get("pot", 0)) + int(delta))
+        return d
+
+    j = await update_json(ABYSS_JACKPOT_PATH, default_abyss_pot(), mut)
+    return int(j.get("pot", 0))
+
+
+async def _abyss_pot_take_all() -> int:
+    def mut(d):
+        d = dict(d or {})
+        pot = int(d.get("pot", 0))
+        d["pot"] = 0
+        d["_taken"] = pot
+        return d
+
+    j = await update_json(ABYSS_JACKPOT_PATH, default_abyss_pot(), mut)
+    return int(j.get("_taken", 0))
+
+
+async def _abyss_announce_big_win(ctx: commands.Context, payout: int, tier: str) -> None:
+    ch_id = _env_int("ANNOUNCE_CHANNEL_ID")
+    if not ch_id or payout < 500_000:
+        return
+    ch = bot.get_channel(ch_id)
+    if not ch:
+        return
+    try:
+        await ch.send(
+            f"☄️☄️ **[전서버 속보]** {ctx.author.mention} 님이 **운명의 심연**에서\n"
+            f"**{tier}** → **{_fmt_money(payout)}** 획득!!!"
+        )
+    except Exception:
+        pass
+
+
+@bot.command(name="심연확률")
+async def abyss_odds_cmd(ctx: commands.Context):
+    if not _channel_allowed(ctx):
+        return
+    pot = await _abyss_pot_read()
+    await ctx.reply(
+        f"{odds_table_text()}\n\n🎰 현재 **심연 잭팟 풀**: **{_fmt_money(pot)}**",
+        mention_author=False,
+    )
+
+
+@bot.command(name="심연잭팟")
+async def abyss_pot_cmd(ctx: commands.Context):
+    if not _channel_allowed(ctx):
+        return
+    pot = await _abyss_pot_read()
+    await ctx.reply(
+        f"🕳️ **심연 잭팟 풀**: **{_fmt_money(pot)}**\n"
+        f"- 베팅의 **{int(ABYSS_POT_RATE*100)}%** 적립\n"
+        f"- **{ABYSS_POT_JACKPOT_CHANCE*100:.3f}%**** 확률로 풀 **전액** + 배당 동시 획득\n"
+        f"- `!심연 <베팅>` 으로 도전 (최소 {_fmt_money(ABYSS_MIN_BET)})",
+        mention_author=False,
+    )
+
+
+@bot.command(name="심연", aliases=["미친도박", "대박복권", "운명의심연"])
+async def abyss_cmd(ctx: commands.Context, bet_raw: str | None = None):
+    if not _channel_allowed(ctx):
+        return
+    bet = _parse_bet(bet_raw)
+    if bet is None:
+        await ctx.reply(
+            "☄️ **운명의 심연** — 극악의 확률, 광기의 배당\n"
+            "사용법: `!심연 <베팅>` (예: `!심연 50000`)\n"
+            f"- 최소 **{_fmt_money(ABYSS_MIN_BET)}** / 상한 **{_fmt_money(ABYSS_MAX_BET)}**\n"
+            "- `!심연확률` 확률표 · `!심연잭팟` 잭팟 풀",
+            mention_author=False,
+        )
+        return
+    if bet < ABYSS_MIN_BET:
+        await ctx.reply(
+            f"심연은 최소 **{_fmt_money(ABYSS_MIN_BET)}** 이상만 받아.\n"
+            f"(일반 카지노보다 하이리스크!)",
+            mention_author=False,
+        )
+        return
+
+    ok, err = await _casino_guard(ctx, bet)
+    if not ok:
+        if err:
+            await ctx.reply(err, mention_author=False)
+        return
+
+    await add_money(ctx.author.id, -bet)
+    pot_after = await _abyss_pot_add(int(bet * ABYSS_POT_RATE))
+
+    roll = roll_abyss(bet)
+    pot_take = 0
+    if roll["pot_hit"]:
+        pot_take = await _abyss_pot_take_all()
+
+    gross = calc_payout(bet, roll["mult"], pot_take, roll["pot_hit"])
+    fee = await _casino_fee(ctx.author.id, 0.01) if gross > 0 else 0.0
+    payout = int(gross * (1.0 - fee)) if gross > 0 else 0
+    if payout > 0:
+        await add_money(ctx.author.id, payout)
+
+    net = payout - bet
+    await _casino_bump(ctx.author.id, bet, net, "심연")
+    bal = await get_money(ctx.author.id)
+
+    tier = roll["tier"]
+    mult = roll["mult"]
+    lines = [
+        "━━━━━━━━━━━━━━━━━━",
+        "☄️ **운명의 심연** 에 빠져든다...",
+        "🌀🌀🌀 ... ... ...",
+        f"✨ 결과: **{tier}**",
+        "━━━━━━━━━━━━━━━━━━",
+    ]
+    if mult <= 0:
+        lines.append(f"💀 **전멸** — 베팅 **{_fmt_money(bet)}** 소멸")
+    elif net < 0:
+        lines.append(
+            f"📉 배율 **x{mult:g}** — 회수 **{_fmt_money(payout)}** "
+            f"(순손실 **{_fmt_money(-net)}**)"
+        )
+    else:
+        lines.append(
+            f"🎉 배율 **x{mult:g}** — 획득 **{_fmt_money(payout)}** "
+            f"(순수익 **+{_fmt_money(net)}**)"
+        )
+    if roll["pot_hit"] and pot_take > 0:
+        lines.append(f"🎰 **심연 잭팟 풀 전액** +{_fmt_money(pot_take)} 포함!!!")
+    lines.append(f"\n🕳️ 심연 잭팟 적립: **{_fmt_money(pot_after)}** / 잔액: **{_fmt_money(bal)}**")
+
+    await ctx.reply("\n".join(lines), mention_author=False)
+
+    if mult >= 50 or roll["pot_hit"]:
+        await _abyss_announce_big_win(ctx, payout, tier)
 
 
 @bot.command(name="더블업")
@@ -4290,6 +4559,186 @@ async def stock_portfolio_cmd(ctx: commands.Context):
     await ctx.reply("\n".join(lines), mention_author=False)
 
 
+def _default_estate() -> Dict[str, dict]:
+    return {}
+
+
+async def _get_user_estates(user_id: int) -> Dict[str, dict]:
+    all_e = await read_json(ESTATE_PATH, _default_estate())
+    raw = dict((all_e or {}).get(str(user_id)) or {})
+    out: Dict[str, dict] = {}
+    for eid, rec in raw.items():
+        if eid in ESTATE_CATALOG and isinstance(rec, dict):
+            out[eid] = rec
+    return out
+
+
+async def _save_user_estates(user_id: int, owned: Dict[str, dict]) -> None:
+    def mut(d):
+        d = dict(d or {})
+        if owned:
+            d[str(user_id)] = owned
+        else:
+            d.pop(str(user_id), None)
+        return d
+
+    await update_json(ESTATE_PATH, _default_estate(), mut)
+
+
+@bot.command(name="부동산")
+async def estate_list_cmd(ctx: commands.Context):
+    if not _channel_allowed(ctx):
+        return
+    lines = [
+        "**🏘️ 한국 지역 부동산 매물** (가격 1억 ~ 20억)\n"
+        "구매 후 **1시간마다** 월세가 쌓여요. `!월세수령`으로 받기\n",
+    ]
+    for eid in ESTATE_CATALOG:
+        lines.append(estate_list_line(eid))
+    await _reply_long(ctx, lines)
+
+
+@bot.command(name="부동산구매")
+async def estate_buy_cmd(ctx: commands.Context, *, query: str | None = None):
+    if not _channel_allowed(ctx):
+        return
+    if not query:
+        await ctx.reply("사용법: `!부동산구매 <매물ID|이름>` (예: `!부동산구매 est_jeju_pension`)", mention_author=False)
+        return
+    eid = resolve_estate(query.strip().split()[0])
+    if not eid:
+        await ctx.reply("매물을 찾을 수 없어. `!부동산` 목록 확인!", mention_author=False)
+        return
+    estate = ESTATE_CATALOG[eid]
+    owned = await _get_user_estates(ctx.author.id)
+    if eid in owned:
+        await ctx.reply("이미 보유 중인 매물이야.", mention_author=False)
+        return
+    price = int(estate["price"])
+    money = await get_money(ctx.author.id)
+    if money < price:
+        await ctx.reply(
+            f"돈이 부족해!\n필요: **{fmt_estate_price(price)}** / 보유: **{_fmt_money(money)}**",
+            mention_author=False,
+        )
+        return
+    now = utc_ts()
+    await add_money(ctx.author.id, -price)
+    owned[eid] = {"bought_at": now, "last_rent": now}
+    await _save_user_estates(ctx.author.id, owned)
+    bal = await get_money(ctx.author.id)
+    await ctx.reply(
+        f"🎉 **{estate['emoji']} {estate['name']}** 매입 완료!\n"
+        f"- 지역: **{estate['region']}**\n"
+        f"- 가격: **{fmt_estate_price(price)}**\n"
+        f"- 시간당 월세: **{int(estate['rent_amount']):,}원** (`!월세수령`)\n"
+        f"- 잔액: **{_fmt_money(bal)}**",
+        mention_author=False,
+    )
+
+
+@bot.command(name="부동산보유", aliases=["내부동산"])
+async def estate_owned_cmd(ctx: commands.Context):
+    if not _channel_allowed(ctx):
+        return
+    owned = await _get_user_estates(ctx.author.id)
+    if not owned:
+        await ctx.reply("보유 부동산이 없어. `!부동산`에서 매물을 확인해줘.", mention_author=False)
+        return
+    now = utc_ts()
+    lines = [f"**🏘️ {ctx.author.display_name}** 보유 부동산\n"]
+    total_pending = 0
+    for eid, rec in owned.items():
+        e = ESTATE_CATALOG[eid]
+        amt, ticks, wait = pending_rent(rec, e, now)
+        total_pending += amt
+        tick_txt = f"수령 가능 **{_fmt_money(amt)}** ({ticks}회분)" if ticks > 0 else f"다음 월세 **{wait // 60}분 {wait % 60}초** 후"
+        lines.append(
+            f"{e['emoji']} **{e['name']}** ({e['region']})\n"
+            f"  └ 매입 **{fmt_estate_price(e['price'])}** · 시세 월세 **{e['rent_amount']:,}원/h**\n"
+            f"  └ {tick_txt}"
+        )
+    lines.append(f"\n💰 미수령 월세 합계: **{_fmt_money(total_pending)}** → `!월세수령`")
+    await _reply_long(ctx, lines)
+
+
+@bot.command(name="월세수령")
+async def estate_collect_cmd(ctx: commands.Context):
+    if not _channel_allowed(ctx):
+        return
+    owned = await _get_user_estates(ctx.author.id)
+    if not owned:
+        await ctx.reply("보유 부동산이 없어.", mention_author=False)
+        return
+    now = utc_ts()
+    total = 0
+    details = []
+    for eid, rec in list(owned.items()):
+        e = ESTATE_CATALOG[eid]
+        amt, ticks, _ = pending_rent(rec, e, now)
+        if ticks <= 0:
+            continue
+        cycle = int(e["rent_cycle_sec"])
+        rec["last_rent"] = int(rec.get("last_rent", rec.get("bought_at", now))) + ticks * cycle
+        owned[eid] = rec
+        total += amt
+        details.append(f"- {e['name']}: **{_fmt_money(amt)}** ({ticks}시간분)")
+
+    if total <= 0:
+        await ctx.reply(
+            "아직 수령할 월세가 없어.\n`!부동산보유`로 다음 지급 시간을 확인해줘.",
+            mention_author=False,
+        )
+        return
+
+    await _save_user_estates(ctx.author.id, owned)
+    bal = await add_money(ctx.author.id, total)
+    await ctx.reply(
+        f"💵 **월세 수령 완료!** 합계 **{_fmt_money(total)}**\n"
+        + "\n".join(details[:15])
+        + (f"\n...외 {len(details)-15}건" if len(details) > 15 else "")
+        + f"\n잔액: **{_fmt_money(bal)}**",
+        mention_author=False,
+    )
+
+
+@bot.command(name="부동산매도")
+async def estate_sell_cmd(ctx: commands.Context, *, query: str | None = None):
+    if not _channel_allowed(ctx):
+        return
+    if not query:
+        await ctx.reply("사용법: `!부동산매도 <매물ID>`", mention_author=False)
+        return
+    eid = resolve_estate(query.strip().split()[0])
+    if not eid:
+        await ctx.reply("매물을 찾을 수 없어.", mention_author=False)
+        return
+    owned = await _get_user_estates(ctx.author.id)
+    if eid not in owned:
+        await ctx.reply("그 매물을 보유하고 있지 않아.", mention_author=False)
+        return
+    estate = ESTATE_CATALOG[eid]
+    rec = owned[eid]
+    now = utc_ts()
+    rent, ticks, _ = pending_rent(rec, estate, now)
+    if ticks > 0:
+        cycle = int(estate["rent_cycle_sec"])
+        rec["last_rent"] = int(rec.get("last_rent", now)) + ticks * cycle
+        await add_money(ctx.author.id, rent)
+
+    payout = int(int(estate["price"]) * SELL_BACK_RATE)
+    del owned[eid]
+    await _save_user_estates(ctx.author.id, owned)
+    bal = await add_money(ctx.author.id, payout)
+    extra = f"\n- 미수령 월세 **{_fmt_money(rent)}** 포함" if rent > 0 else ""
+    await ctx.reply(
+        f"🏷️ **{estate['name']}** 매도 완료\n"
+        f"- 환급 (**{int(SELL_BACK_RATE*100)}%**): **{_fmt_money(payout)}**{extra}\n"
+        f"- 잔액: **{_fmt_money(bal)}**",
+        mention_author=False,
+    )
+
+
 @bot.command(name="이벤트")
 async def events_cmd(ctx: commands.Context):
     if not _channel_allowed(ctx):
@@ -4310,6 +4759,7 @@ async def events_cmd(ctx: commands.Context):
     lines.append(
         f"📰 **[속보]** KST {NEWS_HOURS_KST[0]}시·{NEWS_HOURS_KST[1]}시 — 호재 급등 / 악재 급락"
     )
+    lines.append("☄️ `!심연` — 미친 도박 (최대 2000배, `!심연확률`)")
     await ctx.reply("\n".join(lines), mention_author=False)
 
 
