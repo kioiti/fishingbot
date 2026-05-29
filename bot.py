@@ -95,6 +95,18 @@ from game_stocks import (
     resolve_stock,
     stock_line,
     tick_market,
+    normalize_holding,
+    holding_avg_price,
+    holding_stats,
+    format_holding_detail,
+    format_holding_pl,
+    format_signed_money,
+    roll_stock_news,
+    apply_news_shock,
+    format_news_broadcast,
+    kst_now,
+    kst_today_key,
+    NEWS_HOURS_KST,
 )
 
 
@@ -137,6 +149,7 @@ PET_PATH = DATA_DIR / "pets.json"
 FUN_PATH = DATA_DIR / "fun.json"
 STOCK_MARKET_PATH = DATA_DIR / "stock_market.json"
 STOCK_PORTFOLIO_PATH = DATA_DIR / "stock_portfolio.json"
+STOCK_NEWS_PATH = DATA_DIR / "stock_news.json"
 
 QUIZ_PENDING: Dict[int, dict] = {}
 
@@ -707,6 +720,14 @@ async def stock_market_loop():
         pass
 
 
+@tasks.loop(minutes=15)
+async def stock_news_loop():
+    try:
+        await _maybe_broadcast_stock_news()
+    except Exception:
+        pass
+
+
 @tasks.loop(seconds=300)
 async def weather_refresh_loop():
     try:
@@ -1251,6 +1272,8 @@ async def on_ready():
         weather_refresh_loop.start()
     if not stock_market_loop.is_running():
         stock_market_loop.start()
+    if not stock_news_loop.is_running():
+        stock_news_loop.start()
     await _ensure_stock_market()
     ch_id = _env_int("ANNOUNCE_CHANNEL_ID")
     if ch_id:
@@ -1344,6 +1367,7 @@ async def help_cmd(ctx: commands.Context):
         "- `!주식매도 <종목> <수량>` 매도\n"
         "- `!주식보유` 내 보유 주식·평가액\n"
         "- `!주식시세 <종목>` 종목 상세\n"
+        "- `!주식속보` 최근 [속보] 뉴스 (하루 2회 자동 발표)\n"
     )
     await ctx.reply(msg, mention_author=False)
 
@@ -3865,24 +3889,110 @@ async def _tick_stock_market() -> None:
     )
 
 
-async def _get_user_portfolio(user_id: int) -> Dict[str, int]:
+def _default_stock_news() -> dict:
+    return {"by_day": {}, "last_news": None}
+
+
+async def _apply_stock_news(news: dict) -> tuple[int, int]:
+    m = await _get_stock_market()
+    prices = dict(m.get("prices") or {})
+    prev = dict(m.get("prev") or prices)
+    sid = news["stock_id"]
+    new_prices, new_prev, old_p, new_p = apply_news_shock(
+        prices, prev, sid, float(news["change"])
+    )
+    await write_json(
+        STOCK_MARKET_PATH,
+        {
+            "prices": new_prices,
+            "prev": new_prev,
+            "last_tick": utc_ts(),
+        },
+    )
+    return old_p, new_p
+
+
+async def _broadcast_stock_news() -> str:
+    news = roll_stock_news()
+    old_p, new_p = await _apply_stock_news(news)
+    msg = format_news_broadcast(news, old_p, new_p)
+
+    def mut(state):
+        state = dict(state or {})
+        day = kst_today_key()
+        by_day = dict(state.get("by_day") or {})
+        fired = list(by_day.get(day) or [])
+        news_record = {**news, "old_price": old_p, "new_price": new_p}
+        state["last_news"] = news_record
+        state["history"] = ([news_record] + list(state.get("history") or []))[:20]
+        return state
+
+    await update_json(STOCK_NEWS_PATH, _default_stock_news(), mut)
+
+    ch_id = _env_int("ANNOUNCE_CHANNEL_ID")
+    if ch_id:
+        ch = bot.get_channel(ch_id)
+        if ch:
+            try:
+                await ch.send(msg)
+            except Exception:
+                pass
+    return msg
+
+
+async def _maybe_broadcast_stock_news() -> None:
+    now = kst_now()
+    day = kst_today_key()
+    hour = now.hour
+
+    slot = None
+    for nh in NEWS_HOURS_KST:
+        if hour == nh:
+            slot = nh
+            break
+    if slot is None:
+        return
+
+    state = await read_json(STOCK_NEWS_PATH, _default_stock_news())
+    by_day = dict(state.get("by_day") or {})
+    fired = list(by_day.get(day) or [])
+    if slot in fired:
+        return
+
+    await _broadcast_stock_news()
+
+    def mut(s):
+        s = dict(s or {})
+        bd = dict(s.get("by_day") or {})
+        lst = list(bd.get(day) or [])
+        if slot not in lst:
+            lst.append(slot)
+        bd[day] = lst
+        s["by_day"] = bd
+        return s
+
+    await update_json(STOCK_NEWS_PATH, _default_stock_news(), mut)
+
+
+async def _get_user_portfolio(user_id: int) -> Dict[str, dict]:
     all_p = await read_json(STOCK_PORTFOLIO_PATH, _default_stock_portfolio())
     raw = dict((all_p or {}).get(str(user_id)) or {})
-    out: Dict[str, int] = {}
+    out: Dict[str, dict] = {}
     for k, v in raw.items():
-        try:
-            q = int(v)
-            if q > 0:
-                out[str(k)] = q
-        except Exception:
-            continue
+        h = normalize_holding(v)
+        if h["qty"] > 0:
+            out[str(k)] = h
     return out
 
 
-async def _set_user_portfolio(user_id: int, holdings: Dict[str, int]) -> None:
+async def _set_user_portfolio(user_id: int, holdings: Dict[str, dict]) -> None:
     def mut(d):
         d = dict(d or {})
-        cleaned = {k: int(v) for k, v in holdings.items() if int(v) > 0}
+        cleaned = {}
+        for k, v in holdings.items():
+            h = normalize_holding(v)
+            if h["qty"] > 0:
+                cleaned[k] = h
         if cleaned:
             d[str(user_id)] = cleaned
         else:
@@ -3890,6 +4000,35 @@ async def _set_user_portfolio(user_id: int, holdings: Dict[str, int]) -> None:
         return d
 
     await update_json(STOCK_PORTFOLIO_PATH, _default_stock_portfolio(), mut)
+
+
+def _portfolio_add_buy(port: Dict[str, dict], stock_id: str, qty: int, price: int) -> dict:
+    h = normalize_holding(port.get(stock_id))
+    h["qty"] += int(qty)
+    h["cost_total"] += int(price) * int(qty)
+    port[stock_id] = h
+    return h
+
+
+def _portfolio_remove_sell(port: Dict[str, dict], stock_id: str, qty: int) -> tuple[dict, int]:
+    """반환: (남은 포지션, 매도분 매입원가)"""
+    h = normalize_holding(port.get(stock_id))
+    if h["qty"] <= 0:
+        return h, 0
+    avg = holding_avg_price(h) or 0
+    if avg > 0:
+        cost_sold = int(avg * qty)
+    elif h["cost_total"] > 0:
+        cost_sold = int(h["cost_total"] * qty / h["qty"])
+    else:
+        cost_sold = 0
+    h["qty"] -= qty
+    h["cost_total"] = max(0, h["cost_total"] - cost_sold)
+    if h["qty"] <= 0:
+        port.pop(stock_id, None)
+        return {"qty": 0, "cost_total": 0}, cost_sold
+    port[stock_id] = h
+    return h, cost_sold
 
 
 def _stock_price(market: dict, stock_id: str) -> tuple[int, int]:
@@ -3900,14 +4039,38 @@ def _stock_price(market: dict, stock_id: str) -> tuple[int, int]:
     return cur, old
 
 
+@bot.command(name="주식속보")
+async def stock_news_cmd(ctx: commands.Context):
+    if not _channel_allowed(ctx):
+        return
+    state = await read_json(STOCK_NEWS_PATH, _default_stock_news())
+    last = state.get("last_news")
+    if not last:
+        await ctx.reply(
+            f"아직 속보가 없어. **KST {NEWS_HOURS_KST[0]}시·{NEWS_HOURS_KST[1]}시**에 "
+            f"[속보]가 공지 채널에 올라와!",
+            mention_author=False,
+        )
+        return
+    old_p = int(last.get("old_price", 0))
+    new_p = int(last.get("new_price", 0))
+    await ctx.reply(format_news_broadcast(last, old_p, new_p), mention_author=False)
+
+
 @bot.command(name="주식목록", aliases=["주식"])
 async def stock_list_cmd(ctx: commands.Context):
     if not _channel_allowed(ctx):
         return
     market = await _get_stock_market()
+    state = await read_json(STOCK_NEWS_PATH, _default_stock_news())
+    last = state.get("last_news")
     lines = [
         f"**📈 콩 주식거래소** (시세 **{STOCK_TICK_SECONDS // 60}분**마다 변동)\n"
     ]
+    if last:
+        tag = last.get("tag", "")
+        comp = last.get("company", "")
+        lines.append(f"📰 최근 속보: **{tag}** — **{comp}** (`!주식속보`)\n")
     for sid in STOCKS:
         cur, prev = _stock_price(market, sid)
         lines.append(stock_line(sid, cur, prev))
@@ -3935,15 +4098,18 @@ async def stock_quote_cmd(ctx: commands.Context, *, query: str | None = None):
     cur, prev = _stock_price(market, sid)
     s = STOCKS[sid]
     holdings = await _get_user_portfolio(ctx.author.id)
-    my_qty = int(holdings.get(sid, 0))
-    val = cur * my_qty
+    pos = holdings.get(sid)
+    stats = holding_stats(cur, pos) if pos else None
+    my_block = "보유 없음"
+    if stats:
+        my_block = format_holding_detail(stats, cur)
     await ctx.reply(
         f"**{s['company']}** (`{s['ticker']}`)\n"
         f"- 대표 브랜드: **{s['nick']}**\n"
         f"- 현재가: **{cur:,}원**/주 {format_change(cur, prev)}\n"
         f"- 직전가: **{prev:,}원**\n"
         f"- 기준가(참고): **{int(s['base_price']):,}원**\n"
-        f"- 내 보유: **{my_qty}주** (평가 **{_fmt_money(val)}**)",
+        f"\n**📌 내 포지션**\n{my_block}",
         mention_author=False,
     )
 
@@ -3986,15 +4152,21 @@ async def stock_buy_cmd(ctx: commands.Context, query: str | None = None, qty_raw
 
     await add_money(ctx.author.id, -total)
     port = await _get_user_portfolio(ctx.author.id)
-    port[sid] = int(port.get(sid, 0)) + qty
+    h = _portfolio_add_buy(port, sid, qty, price)
     await _set_user_portfolio(ctx.author.id, port)
     bal = await get_money(ctx.author.id)
     s = STOCKS[sid]
+    avg = holding_avg_price(h)
+    st = holding_stats(price, h)
+    pl_hint = f"\n- **평균 매수가 {avg:,}원/주** (매입 총 **{h['cost_total']:,}원**)"
+    if st and st.get("pl") is not None and st["pl"] != 0:
+        pl_hint += f"\n- 현재가 기준: {format_holding_pl(st)}"
     await ctx.reply(
         f"✅ **매수 체결**\n"
         f"- 종목: **{s['company']}** (`{s['ticker']}`)\n"
-        f"- 체결: **{price:,}원** x **{qty}주** = **{_fmt_money(total)}**\n"
-        f"- 보유: **{port[sid]}주** / 잔액: **{_fmt_money(bal)}**",
+        f"- 이번 체결가: **{price:,}원** x **{qty}주** = **{_fmt_money(total)}**\n"
+        f"- 보유: **{h['qty']}주**{pl_hint}\n"
+        f"- 잔액: **{_fmt_money(bal)}**",
         mention_author=False,
     )
 
@@ -4016,7 +4188,7 @@ async def stock_sell_cmd(ctx: commands.Context, query: str | None = None, qty_ra
         return
 
     port = await _get_user_portfolio(ctx.author.id)
-    have = int(port.get(sid, 0))
+    have = int(normalize_holding(port.get(sid)).get("qty", 0))
     if have <= 0:
         await ctx.reply("그 주식은 보유하고 있지 않아.", mention_author=False)
         return
@@ -4039,18 +4211,25 @@ async def stock_sell_cmd(ctx: commands.Context, query: str | None = None, qty_ra
     market = await _get_stock_market()
     price, _ = _stock_price(market, sid)
     total = price * qty
+    _, cost_sold = _portfolio_remove_sell(port, sid, qty)
+    realized = total - cost_sold
     await add_money(ctx.author.id, total)
-    port[sid] = have - qty
-    if port[sid] <= 0:
-        port.pop(sid, None)
     await _set_user_portfolio(ctx.author.id, port)
     bal = await get_money(ctx.author.id)
     s = STOCKS[sid]
-    left = int(port.get(sid, 0))
+    left = int(normalize_holding(port.get(sid, {})).get("qty", 0))
+    pl_line = ""
+    if cost_sold > 0:
+        pct = realized / cost_sold * 100 if cost_sold else 0
+        icon = "🟢" if realized > 0 else ("🔴" if realized < 0 else "⚪")
+        pl_line = (
+            f"\n- 실현 손익: {icon} **{format_signed_money(realized)}** ({pct:+.2f}%)\n"
+            f"  (매입원가 **{cost_sold:,}원** → 매도 **{total:,}원**)"
+        )
     await ctx.reply(
         f"✅ **매도 체결**\n"
         f"- 종목: **{s['company']}** (`{s['ticker']}`)\n"
-        f"- 체결: **{price:,}원** x **{qty}주** = **{_fmt_money(total)}**\n"
+        f"- 체결가: **{price:,}원** x **{qty}주** = **{_fmt_money(total)}**{pl_line}\n"
         f"- 남은 보유: **{left}주** / 잔액: **{_fmt_money(bal)}**",
         mention_author=False,
     )
@@ -4070,20 +4249,44 @@ async def stock_portfolio_cmd(ctx: commands.Context):
     market = await _get_stock_market()
     lines = [f"**💼 {ctx.author.display_name}** 주식 포트폴리오\n"]
     total_val = 0
-    for sid, qty in sorted(port.items(), key=lambda x: -x[1]):
+    total_cost = 0
+    total_pl = 0
+    has_cost = False
+    rows = []
+    for sid, pos in port.items():
         if sid not in STOCKS:
             continue
         cur, prev = _stock_price(market, sid)
-        val = cur * qty
-        total_val += val
+        stats = holding_stats(cur, pos)
+        if not stats:
+            continue
+        rows.append((stats["value"], sid, pos, cur, prev, stats))
+    rows.sort(key=lambda r: r[0], reverse=True)
+
+    for _val, sid, pos, cur, prev, stats in rows:
+        total_val += stats["value"]
         s = STOCKS[sid]
         lines.append(
-            f"- **{s['company']}** `{s['ticker']}` — **{qty}주** "
-            f"@ {cur:,}원 ({format_change(cur, prev)}) → **{_fmt_money(val)}**"
+            f"**{s['company']}** `{s['ticker']}` · 시세 {cur:,}원 {format_change(cur, prev)}"
         )
+        lines.append(format_holding_detail(stats, cur))
+        lines.append("")
+        if stats.get("pl") is not None:
+            has_cost = True
+            total_cost += stats["cost_total"]
+            total_pl += stats["pl"]
     cash = await get_money(ctx.author.id)
-    lines.append(f"\n📊 주식 평가액: **{_fmt_money(total_val)}**")
-    lines.append(f"💰 현금: **{_fmt_money(cash)}** · 총자산(대략): **{_fmt_money(total_val + cash)}**")
+    lines.append(f"📊 **주식 평가 합계: {_fmt_money(total_val)}**")
+    if has_cost:
+        total_pct = (total_pl / total_cost * 100) if total_cost > 0 else 0
+        icon = "🟢" if total_pl > 0 else ("🔴" if total_pl < 0 else "⚪")
+        lines.append(
+            f"{icon} **총 평가손익: {format_signed_money(total_pl)}** ({total_pct:+.2f}%)\n"
+            f"   (매입 **{total_cost:,}원** → 평가 **{total_val:,}원**)"
+        )
+    else:
+        lines.append("📋 평균 매수가 미기록 종목 있음 → 추가 매수 후 손익 표시")
+    lines.append(f"💰 현금 **{_fmt_money(cash)}** · 총자산 **{_fmt_money(total_val + cash)}**")
     await ctx.reply("\n".join(lines), mention_author=False)
 
 
@@ -4104,6 +4307,9 @@ async def events_cmd(ctx: commands.Context):
     lines.append("📅 `!일일` — 연속 출석 보너스")
     lines.append("❓ `!물고기퀴즈` — 5분 쿨타임")
     lines.append("📈 `!주식목록` — 닉네임 주식 (2분마다 시세 변동)")
+    lines.append(
+        f"📰 **[속보]** KST {NEWS_HOURS_KST[0]}시·{NEWS_HOURS_KST[1]}시 — 호재 급등 / 악재 급락"
+    )
     await ctx.reply("\n".join(lines), mention_author=False)
 
 
