@@ -1375,100 +1375,68 @@ async def on_ready():
                 pass
 
 
+HELP_TOPICS: Dict[str, list[str]] = {
+    "낚시": [
+        "**🎣 낚시 · 성장**",
+        "`!낚시` `!인벤` `!판매` `!판매 all` `!판매 아이템all` `!판매 전체`",
+        "`!도감` `!낚시대` `!강화`",
+        "`!상점` `!아이템상점` `!구매` `!미끼장착` `!낚시터` `!이동`",
+        "`!랭킹` `!낚시대랭킹` `!보스` `!보스공격` `!자동낚시`",
+        "`!상자` `!상자깨기` `!상자정보` `!보물상자`(30분 쿨)",
+    ],
+    "카지노": [
+        "**🎲 카지노** (베팅 상한 50만)",
+        "`!슬롯` `!슬롯10` `!주사위` `!동전` `!룰렛` `!바카라`",
+        "`!하이로우` `!복권` `!가위바위보` `!더블업` `!행운바퀴`",
+        "`!블랙잭` `!스크래치` `!로켓` `!잭팟` `!잭팟랭킹` `!카지노` `!주화`",
+        "**☄️ 심연** `!심연` `!심연확률` `!심연잭팟` (최대 2000배)",
+    ],
+    "성장": [
+        "**🌟 성장 · 이벤트**",
+        "`!일일` `!행운판` `!프로필` `!퀘스트` `!업적` `!칭호`",
+        "`!날씨` `!시세` `!뽑기` `!수수권` `!제작` `!대결` `!낚시랭킹`",
+        "`!펫` `!펫데려오기` `!펫밥` `!펫이름` `!토너먼트` `!토너랭킹`",
+        "`!물고기퀴즈` `!퀴즈정답` `!이벤트`",
+    ],
+    "투자": [
+        "**📈 주식 · 부동산**",
+        "`!주식목록` `!주식매수` `!주식매도` `!주식매도 전체` `!주식보유` `!주식시세`",
+        "`!부동산` `!부동산구매` `!부동산보유` `!월세수령` `!부동산매도`",
+        "`!대출` `!상환`",
+    ],
+}
+
+
+def _help_all_parts() -> list[str]:
+    parts = ["**🎣 낚시 RPG — 전체 명령어**", "카테고리: `!도움말 낚시` `!도움말 카지노` `!도움말 성장` `!도움말 투자`"]
+    for lines in HELP_TOPICS.values():
+        parts.extend(lines)
+        parts.append("")
+    return parts
+
+
 @bot.command(name="도움말")
-async def help_cmd(ctx: commands.Context):
+async def help_cmd(ctx: commands.Context, topic: str | None = None):
     if not _channel_allowed(ctx):
         return
-    msg = (
-        "**🎣 낚시 RPG 봇 명령어**\n"
-        "- `!낚시` 낚시하기 (위치한 낚시터 및 장착 미끼 적용)\n"
-        "- `!인벤` 내 인벤토리 보기 (물고기 / 소모품 / 위치 / 장착 미끼)\n"
-        "- `!판매 <이름|all>` 물고기 판매 (도감 판매 보너스 적용)\n"
-        "- `!도감` 물고기 도감 달성률 및 영구 도감 버프 보기\n"
-        "- `!낚시대` 내 낚시대 정보 및 보유금 조회\n"
-        "- `!강화` 낚시대 강화 (최대 +25강 / 등급 하락 페널티 및 보호 주문서 적용)\n"
-        "- `!상점` 낚시대 상점 보기\n"
-        "- `!아이템상점` 미끼 및 주문서 상점 보기\n"
-        "- `!구매 <낚시대ID|아이템ID> [수량]` 낚시대 또는 아이템 구매\n"
-        "- `!미끼장착 <미끼ID|off>` 미끼 장착 또는 장착 해제\n"
-        "- `!낚시터` 이동 가능한 낚시터 목록 보기\n"
-        "- `!이동 <낚시터ID>` 낚시터로 이동 (이동 비용 및 최소 강화 필요)\n"
-        "- `!랭킹` 보유금 TOP 10 랭킹\n"
-        "- `!낚시대랭킹` 낚시대 강화 TOP 10 랭킹\n"
-        "- `!보스` 오늘의 요일 보스 상태 확인 및 스폰\n"
-        "- `!보스공격` 보스에게 공격 가하기\n"
-        "- `!자동낚시` 자동낚시 ON/OFF\n"
-        "\n"
-        "**🎲 카지노 명령어**\n"
-        "- `!슬롯 <베팅>` 슬롯머신 돌리기\n"
-        "- `!슬롯10 <베팅>` 슬롯 10회 연속 돌리기\n"
-        "- `!주사위 <베팅>` 1~6 주사위 던지기\n"
-        "- `!동전 <베팅> <앞|뒤>` 동전 뒤집기 베팅\n"
-        "- `!잭팟` 현재 잭팟 누적 금액 확인\n"
-        "- `!잭팟랭킹` 잭팟 명예의 전당 랭킹\n"
-        "- `!카지노` 본인의 카지노 상세 기록\n"
-        "- `!룰렛 <베팅> <빨강|검정|초록>` 룰렛 색상 베팅\n"
-        "- `!바카라 <베팅> <플레이어|뱅커>` 바카라\n"
-        "- `!하이로우 <베팅> <하이|로우>` 숫자 맞추기\n"
-        "- `!복권 <베팅>` 행운 복권 (3개 번호)\n"
-        "- `!가위바위보 <베팅> <가위|바위|보>`\n"
-        "- `!더블업 <베팅>` 50% 확률로 2배\n"
-        "- `!행운바퀴 <베팅>` 룰렛형 행운의 바퀴\n"
-        "- `!블랙잭 <베팅>` 간이 블랙잭\n"
-        "- `!주화` 행운의 주화 사용 (카지노 수수료 50%↓ 1회)\n"
-        "- `!심연 <베팅>` ☄️ 미친 도박 (최대 **2000배**, 확률 극低)\n"
-        "- `!심연확률` / `!심연잭팟` 심연 확률·잭팟 풀\n"
-        "\n"
-        "**📦 보물상자 (낚시 드롭)**\n"
-        "- `!상자` 보유 상자 목록\n"
-        "- `!상자깨기 <상자ID|all>` 상자 개봉\n"
-        "- `!상자정보` 상자 종류 설명\n"
-        "\n"
-        "**🎁 이벤트**\n"
-        "- `!일일` 하루 1회 출석 (연속 출석 보너스)\n"
-        "- `!보물상자` 30분마다 무료 보물 (쿨타임)\n"
-        "- `!행운판` 하루 1회 무료 행운판\n"
-        "\n"
-        "**🐾 펫 · 토너먼트 · 퀴즈**\n"
-        "- `!펫` / `!펫데려오기 [ID]` 동반 펫 (낚시 보너스)\n"
-        "- `!펫밥` 펫 밥주기 (레벨업)\n"
-        "- `!펫이름 <이름>` 펫 이름 짓기\n"
-        "- `!토너먼트` 금~일 낚시 점수전\n"
-        "- `!토너랭킹` 토너먼트 순위\n"
-        "- `!물고기퀴즈` / `!퀴즈정답 <번호>` 퀴즈 보상\n"
-        "\n"
-        "**🌟 확장 컨텐츠**\n"
-        "- `!프로필` 내 통계·칭호·업적\n"
-        "- `!퀘스트` 일일/주간 퀘스트\n"
-        "- `!업적` 업적 목록\n"
-        "- `!칭호 [ID]` 칭호 장착/목록\n"
-        "- `!날씨` 서버 날씨 (낚시 보너스)\n"
-        "- `!시세` 오늘 물고기 시세\n"
-        "- `!뽑기` 가챠 뽑기\n"
-        "- `!수수권` 신비한 상인 (1시간)\n"
-        "- `!제작 <아이템ID>` 물고기로 제작\n"
-        "- `!대결 @유저 <베팅>` 낚시 대결\n"
-        "- `!낚시랭킹` 주간 낚시 횟수 랭킹\n"
-        "- `!스크래치 <베팅>` 복권 긁기\n"
-        "- `!로켓 <베팅> <배율>` 로켓 멀티\n"
-        "- `!대출 <금액>` / `!상환` (이자 10%)\n"
-        "\n"
-        "**📈 주식 (낚시 수입으로 투자)**\n"
-        "- `!주식목록` 시세·등락률 보기\n"
-        "- `!주식매수 <종목> <수량>` 매수 (닉/회사명/티커)\n"
-        "- `!주식매도 <종목> <수량>` 매도\n"
-        "- `!주식보유` 내 보유 주식·평가액\n"
-        "- `!주식시세 <종목>` 종목 상세\n"
-        "- `!주식속보` 최근 [속보] 뉴스 (하루 2회 자동 발표)\n"
-        "\n"
-        "**🏘️ 부동산**\n"
-        "- `!부동산` 매물 목록 (1억~20억)\n"
-        "- `!부동산구매 <ID>` 구매\n"
-        "- `!부동산보유` 내 부동산\n"
-        "- `!월세수령` 누적 월세 수령 (1시간마다 적립)\n"
-        "- `!부동산매도 <ID>` 매도 (매입가 70%)\n"
-    )
-    await ctx.reply(msg, mention_author=False)
+    try:
+        key = (topic or "").strip().lower()
+        if key and key not in HELP_TOPICS and key not in ("전체", "all"):
+            await ctx.reply(
+                "없는 카테고리야.\n"
+                "`!도움말` 전체 · `!도움말 낚시` · `!도움말 카지노` · `!도움말 성장` · `!도움말 투자`",
+                mention_author=False,
+            )
+            return
+        parts = HELP_TOPICS[key] if key in HELP_TOPICS else _help_all_parts()
+        header = f"**도움말 — {key}**" if key in HELP_TOPICS else ""
+        await _reply_long(ctx, parts, header=header)
+    except discord.HTTPException:
+        await ctx.reply(
+            "도움말이 길어서 나눠 보낼게.\n"
+            "`!도움말 낚시` / `!도움말 카지노` / `!도움말 성장` / `!도움말 투자`",
+            mention_author=False,
+        )
 
 
 @bot.command(name="낚시대")
@@ -1973,12 +1941,124 @@ async def inv_cmd(ctx: commands.Context):
         )
 
 
+def _sell_mult_for_user(buffs: dict, rod_type: str) -> float:
+    return (1.0 + buffs.get("sell_bonus", 0.0)) * _rod_sell_mult(rod_type) * market_mult_today()
+
+
+async def _sell_all_fish(user_id: int, sell_mult: float) -> int:
+    inv = await get_inventory(user_id)
+    total = 0
+    for fish_id, cnt in inv.items():
+        if fish_id in FISH_BY_ID or fish_id.startswith("shiny_"):
+            total += int(math.floor(_fish_sell_price(fish_id) * cnt * sell_mult))
+
+    if total <= 0:
+        return 0
+
+    def mut(d):
+        d = dict(d or {})
+        uinv = get_user_dict(d, user_id, {})
+        for key in list(uinv.keys()):
+            if key in FISH_BY_ID or key.startswith("shiny_"):
+                uinv.pop(key, None)
+        if not uinv:
+            d.pop(str(user_id), None)
+        return d
+
+    await update_json(INV_PATH, _default_inventory(), mut)
+    return total
+
+
+async def _sell_all_items(user_id: int) -> tuple[int, list[str]]:
+    """소모품·재료(상점 판매가 있는 ITEMS) 일괄 판매. 상자·물고기 제외."""
+    inv = await get_inventory(user_id)
+    total = 0
+    lines: list[str] = []
+    for iid, cnt in list(inv.items()):
+        if iid in CHESTS or iid in FISH_BY_ID or str(iid).startswith("shiny_"):
+            continue
+        if iid not in ITEMS:
+            continue
+        price = int(ITEMS[iid].get("price", 0))
+        if price <= 0 or cnt <= 0:
+            continue
+        value = price * int(cnt)
+        total += value
+        await add_fish(user_id, iid, -int(cnt))
+        lines.append(f"- {ITEMS[iid]['name']} x{cnt} ({value:,}원)")
+    return total, lines
+
+
+async def _stock_sell_all(ctx: commands.Context) -> None:
+    port = await _get_user_portfolio(ctx.author.id)
+    if not port:
+        await ctx.reply("보유 주식이 없어.", mention_author=False)
+        return
+
+    market = await _get_stock_market()
+    total_payout = 0
+    total_cost = 0
+    details: list[str] = []
+
+    for sid in list(port.keys()):
+        if sid not in STOCKS:
+            continue
+        pos = port.get(sid)
+        qty = int(normalize_holding(pos).get("qty", 0))
+        if qty <= 0:
+            continue
+        price, _ = _stock_price(market, sid)
+        payout = price * qty
+        _, cost_sold = _portfolio_remove_sell(port, sid, qty)
+        realized = payout - cost_sold
+        total_payout += payout
+        total_cost += cost_sold
+        s = STOCKS[sid]
+        pl_icon = "🟢" if realized > 0 else ("🔴" if realized < 0 else "⚪")
+        details.append(
+            f"- **{s['company']}** {qty}주 @ {price:,}원 → {_fmt_money(payout)} "
+            f"({pl_icon} {format_signed_money(realized)})"
+        )
+
+    if total_payout <= 0:
+        await ctx.reply("매도할 주식이 없어.", mention_author=False)
+        return
+
+    await _set_user_portfolio(ctx.author.id, port)
+    bal = await add_money(ctx.author.id, total_payout)
+    total_realized = total_payout - total_cost
+    pct = (total_realized / total_cost * 100) if total_cost > 0 else 0
+    summary_pl = ""
+    if total_cost > 0:
+        icon = "🟢" if total_realized > 0 else ("🔴" if total_realized < 0 else "⚪")
+        summary_pl = (
+            f"\n{icon} **총 실현손익: {format_signed_money(total_realized)}** ({pct:+.2f}%)"
+        )
+
+    body = "\n".join(details[:20])
+    if len(details) > 20:
+        body += f"\n... 외 {len(details) - 20}종목"
+    await ctx.reply(
+        f"✅ **주식 전량 매도** ({len(details)}종목)\n"
+        f"{body}\n"
+        f"\n💰 매도 합계: **{_fmt_money(total_payout)}**{summary_pl}\n"
+        f"잔액: **{_fmt_money(bal)}**",
+        mention_author=False,
+    )
+
+
 @bot.command(name="판매")
 async def sell_cmd(ctx: commands.Context, *, target: str | None = None):
     if not _channel_allowed(ctx):
         return
     if not target:
-        await ctx.reply("사용법: `!판매 <물고기이름|all>`", mention_author=False)
+        await ctx.reply(
+            "사용법:\n"
+            "- `!판매 <물고기이름>` / `!판매 all` 물고기 전부\n"
+            "- `!판매 아이템all` 소모품·재료 전부 (미끼·주문서 등)\n"
+            "- `!판매 전체` 물고기 + 소모품 한 번에",
+            mention_author=False,
+        )
         return
 
     target = target.strip()
@@ -1989,7 +2069,7 @@ async def sell_cmd(ctx: commands.Context, *, target: str | None = None):
 
     buffs = await get_collection_buffs(ctx.author.id)
     rod_type, _ = await get_rod(ctx.author.id)
-    sell_mult = (1.0 + buffs.get("sell_bonus", 0.0)) * _rod_sell_mult(rod_type) * market_mult_today()
+    sell_mult = _sell_mult_for_user(buffs, rod_type)
     bonus_parts = []
     if buffs.get("sell_bonus", 0.0) > 0:
         bonus_parts.append("도감 +5%")
@@ -1997,32 +2077,59 @@ async def sell_cmd(ctx: commands.Context, *, target: str | None = None):
         bonus_parts.append("낚시대 판매보너스")
     bonus_txt = f" ({', '.join(bonus_parts)} 적용)" if bonus_parts else ""
 
-    if target.lower() == "all":
-        total = 0
-        for fish_id, cnt in inv.items():
-            if fish_id in FISH_BY_ID or fish_id.startswith("shiny_"):
-                total += int(math.floor(_fish_sell_price(fish_id) * cnt * sell_mult))
-                
+    tlower = target.lower().replace(" ", "")
+
+    if tlower in ("아이템all", "소모품all", "재료all", "소모품전부", "아이템전부"):
+        item_total, item_lines = await _sell_all_items(ctx.author.id)
+        if item_total <= 0:
+            await ctx.reply(
+                "판매할 소모품·재료가 없어. (상점 판매가 있는 아이템만 해당, 상자 제외)",
+                mention_author=False,
+            )
+            return
+        bal = await add_money(ctx.author.id, item_total)
+        body = "\n".join(item_lines[:25])
+        if len(item_lines) > 25:
+            body += f"\n... 외 {len(item_lines) - 25}종"
+        await ctx.reply(
+            f"🛒 **소모품·재료 일괄 판매** ({len(item_lines)}종)\n"
+            f"{body}\n\n"
+            f"획득: **{_fmt_money(item_total)}** / 잔액: **{_fmt_money(bal)}**",
+            mention_author=False,
+        )
+        return
+
+    if tlower in ("전체", "풀팔기", "다팔기", "all전체"):
+        fish_total = await _sell_all_fish(ctx.author.id, sell_mult)
+        item_total, item_lines = await _sell_all_items(ctx.author.id)
+        grand = fish_total + item_total
+        if grand <= 0:
+            await ctx.reply("판매할 물고기·소모품이 없어.", mention_author=False)
+            return
+        if fish_total > 0:
+            await quest_bump(ctx.author.id, "sell_gold", 0, extra=fish_total)
+        bal = await add_money(ctx.author.id, grand)
+        parts = [f"💰 **일괄 판매 완료**{bonus_txt}"]
+        if fish_total > 0:
+            parts.append(f"- 🐟 물고기: **{_fmt_money(fish_total)}**")
+        if item_total > 0:
+            parts.append(f"- 🎒 소모품·재료: **{_fmt_money(item_total)}** ({len(item_lines)}종)")
+        parts.append(f"- 합계: **{_fmt_money(grand)}** / 잔액: **{_fmt_money(bal)}**")
+        await ctx.reply("\n".join(parts), mention_author=False)
+        return
+
+    if tlower == "all":
+        total = await _sell_all_fish(ctx.author.id, sell_mult)
         if total <= 0:
             await ctx.reply("인벤토리에 판매 가능한 물고기가 없어.", mention_author=False)
             return
 
-        def mut(d):
-            d = dict(d or {})
-            uinv = get_user_dict(d, ctx.author.id, {})
-            # 일반 물고기 아이템만 삭제하고 소모품(미끼, 주문서 등)은 보존
-            for key in list(uinv.keys()):
-                if key in FISH_BY_ID or key.startswith("shiny_"):
-                    uinv.pop(key, None)
-            if not uinv:
-                d.pop(str(ctx.author.id), None)
-            return d
-
-        await update_json(INV_PATH, _default_inventory(), mut)
         bal = await add_money(ctx.author.id, total)
         await quest_bump(ctx.author.id, "sell_gold", 0, extra=total)
         await ctx.reply(
-            f"전부 판매 완료!{bonus_txt} 획득: **{_fmt_money(total)}** / 현재 잔액: **{_fmt_money(bal)}**",
+            f"🐟 **물고기 전부 판매!**{bonus_txt}\n"
+            f"획득: **{_fmt_money(total)}** / 잔액: **{_fmt_money(bal)}**\n"
+            f"(소모품은 `!판매 아이템all` · 한꺼번에 `!판매 전체`)",
             mention_author=False,
         )
         return
@@ -4344,7 +4451,7 @@ async def stock_list_cmd(ctx: commands.Context):
         cur, prev = _stock_price(market, sid)
         lines.append(stock_line(sid, cur, prev))
     lines.append(
-        "\n💡 예: `!주식매수 머래제약 5` · `!주식매도 MRRX 2` · `!주식보유`"
+        "\n💡 `!주식매수 머래 5` · `!주식매도 MRRX all` · `!주식매도 전체`"
     )
     await ctx.reply("\n".join(lines), mention_author=False)
 
@@ -4440,17 +4547,34 @@ async def stock_buy_cmd(ctx: commands.Context, query: str | None = None, qty_raw
     )
 
 
-@bot.command(name="주식매도")
+@bot.command(name="주식매도", aliases=["주식일괄매도"])
 async def stock_sell_cmd(ctx: commands.Context, query: str | None = None, qty_raw: str | None = None):
     if not _channel_allowed(ctx):
         return
-    if not query or not qty_raw:
+    if not query:
         await ctx.reply(
-            "사용법: `!주식매도 <종목> <수량>`\n"
-            "예: `!주식매도 MRRX 5` · `!주식매도 에빙전자 all`",
+            "사용법:\n"
+            "- `!주식매도 <종목> <수량>` (수량 `all` 가능)\n"
+            "- `!주식매도 전체` / `!주식매도 all` 보유 주식 **전량 매도**",
             mention_author=False,
         )
         return
+
+    qnorm = query.strip().lower().replace(" ", "")
+    if qnorm in ("전체", "all", "일괄", "전량", "풀매도") and (
+        not qty_raw or qty_raw.strip().lower() in ("", "all", "전체")
+    ):
+        await _stock_sell_all(ctx)
+        return
+
+    if not qty_raw:
+        await ctx.reply(
+            "수량을 입력해줘.\n"
+            "예: `!주식매도 MRRX 5` · `!주식매도 머래제약 all` · `!주식매도 전체`",
+            mention_author=False,
+        )
+        return
+
     sid = resolve_stock(query)
     if not sid:
         await ctx.reply("종목을 찾을 수 없어.", mention_author=False)
