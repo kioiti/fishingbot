@@ -15,24 +15,103 @@ ACHIEVEMENTS: Dict[str, dict] = {
     "ach_legendary_10": {"name": "👑 전설의 손", "desc": "전설 물고기 10마리", "check": "legendary_total", "target": 10, "reward": 80000},
     "ach_mythic_3": {"name": "☄️ 신화를 낚다", "desc": "신화 물고기 3마리", "check": "mythic_total", "target": 3, "reward": 150000},
     "ach_upgrade_15": {"name": "🔨 강화 장인", "desc": "낚시대 +15 달성", "check": "rod_level", "target": 15, "reward": 100000},
-    "ach_upgrade_25": {"name": "⚡ 최고 강화", "desc": "낚시대 +25 달성", "check": "rod_level", "target": 25, "reward": 300000},
+    "ach_upgrade_25": {"name": "⚡ 강화 마스터", "desc": "낚시대 +25 달성", "check": "rod_level", "target": 25, "reward": 300000},
+    "ach_upgrade_30": {"name": "🌟 신의 손길", "desc": "낚시대 +30 달성", "check": "rod_level", "target": 30, "reward": 500000},
     "ach_boss_10": {"name": "🐉 보스 헌터", "desc": "보스 공격 10회", "check": "boss_hits", "target": 10, "reward": 60000},
     "ach_casino_win_20": {"name": "🎰 행운아", "desc": "카지노 승리 20회", "check": "casino_wins", "target": 20, "reward": 40000},
     "ach_duel_5": {"name": "⚔️ 결투왕", "desc": "낚시 대결 5승", "check": "duel_wins", "target": 5, "reward": 70000},
     "ach_rich": {"name": "💰 부자", "desc": "보유금 100만원", "check": "money", "target": 1000000, "reward": 50000},
     "ach_gacha_30": {"name": "🎁 뽑기 중독", "desc": "뽑기 30회", "check": "gacha_total", "target": 30, "reward": 80000},
+    "ach_streak_30": {
+        "name": "🔥 불꽃 낚시광",
+        "desc": "하루에 연속 낚시 30회 달성",
+        "check": "max_streak_today",
+        "target": 30,
+        "reward": 120000,
+    },
 }
 
-# ── 칭호 (업적/조건解鎖) ──────────────────────────
+# 칭호 장착 시 능력치 (낚시·보스·판매·강화·카지노에 반영)
+# rarity/chest/shiny: 확률 가산 | rare~mythic: 해당 등급 가중치 | boss/crit/sell/cooldown/fragment/upgrade_chance/casino
 TITLES: Dict[str, dict] = {
-    "title_rookie": {"name": "🐣 초보 낚시꾼", "req": None},
-    "title_angler": {"name": "🎣 낚시 마스터", "req": "ach_fish_100"},
-    "title_legend": {"name": "👑 전설의 낚시왕", "req": "ach_legendary_10"},
-    "title_mythic": {"name": "☄️ 신화의 그물", "req": "ach_mythic_3"},
-    "title_gambler": {"name": "🎰 카지노의 왕", "req": "ach_casino_win_20"},
-    "title_hunter": {"name": "🐉 보스 학살자", "req": "ach_boss_10"},
-    "title_shiny": {"name": "✨ 이색의 예술가", "req": "ach_shiny_5"},
-    "title_whale": {"name": "🐋 돈 좀 쓰는 사람", "req": "ach_rich"},
+    "title_rookie": {"name": "🐣 초보 낚시꾼", "req": None, "stats": {"rarity": 0.01}},
+    "title_angler": {
+        "name": "🎣 낚시 마스터",
+        "req": "ach_fish_100",
+        "stats": {"rarity": 0.025, "cooldown": 0.5},
+    },
+    "title_deep": {
+        "name": "🌊 바다의 지배자",
+        "req": "ach_fish_500",
+        "stats": {"rarity": 0.03, "chest": 0.03, "sell": 0.05},
+    },
+    "title_chest": {
+        "name": "📦 보물 사냥꾼",
+        "req": "ach_chest_20",
+        "stats": {"chest": 0.06, "rarity": 0.015},
+    },
+    "title_legend": {
+        "name": "👑 전설의 낚시왕",
+        "req": "ach_legendary_10",
+        "stats": {"legendary": 0.07, "rarity": 0.02},
+    },
+    "title_mythic": {
+        "name": "☄️ 신화의 그물",
+        "req": "ach_mythic_3",
+        "stats": {"mythic": 0.05, "legendary": 0.04, "shiny": 0.012},
+    },
+    "title_gambler": {
+        "name": "🎰 카지노의 왕",
+        "req": "ach_casino_win_20",
+        "stats": {"casino": 0.015, "chest": 0.02},
+    },
+    "title_hunter": {
+        "name": "🐉 보스 학살자",
+        "req": "ach_boss_10",
+        "stats": {"boss": 0.12, "crit": 0.04},
+    },
+    "title_shiny": {
+        "name": "✨ 이색의 예술가",
+        "req": "ach_shiny_5",
+        "stats": {"shiny": 0.025, "rarity": 0.015},
+    },
+    "title_whale": {
+        "name": "🐋 돈 좀 쓰는 사람",
+        "req": "ach_rich",
+        "stats": {"sell": 0.10, "fragment": 0.02},
+    },
+    "title_artisan": {
+        "name": "🔨 강화 장인",
+        "req": "ach_upgrade_30",
+        "stats": {"upgrade_chance": 0.025, "cooldown": 0.5},
+    },
+    "title_duelist": {
+        "name": "⚔️ 결투왕",
+        "req": "ach_duel_5",
+        "stats": {"boss": 0.08, "crit": 0.03},
+    },
+    "title_streak": {
+        "name": "🔥 연소의 낚시광",
+        "req": "ach_streak_30",
+        "stats": {"rarity": 0.04, "shiny": 0.02, "chest": 0.03},
+    },
+}
+
+STAT_LABELS: Dict[str, str] = {
+    "rarity": "희귀",
+    "chest": "상자",
+    "shiny": "이색",
+    "rare": "레어 가중",
+    "epic": "에픽 가중",
+    "legendary": "전설 가중",
+    "mythic": "신화 가중",
+    "boss": "보스 피해",
+    "crit": "치명타",
+    "sell": "판매가",
+    "cooldown": "쿨감(초)",
+    "fragment": "파편",
+    "upgrade_chance": "강화 성공",
+    "casino": "카지노 수수료↓",
 }
 
 # ── 일일 퀘스트 풀 ────────────────────────────────
@@ -189,6 +268,8 @@ def achievement_current_value(profile: dict, ach_id: str, rod_level: int, money:
         return money
     if check == "gacha_total":
         return int(profile.get("gacha_total", 0))
+    if check == "max_streak_today":
+        return int(profile.get("max_streak_today", 0))
     return 0
 
 
@@ -202,6 +283,60 @@ def achievement_progress(profile: dict, ach_id: str, rod_level: int, money: int)
     if not a:
         return False
     return achievement_current_value(profile, ach_id, rod_level, money) >= int(a["target"])
+
+
+def title_stats(title_id: str) -> dict:
+    t = TITLES.get(title_id, {})
+    return dict(t.get("stats") or {})
+
+
+def format_title_stats(stats: dict) -> str:
+    if not stats:
+        return "특수 효과 없음"
+    parts: List[str] = []
+    pct_keys = {
+        "rarity",
+        "chest",
+        "shiny",
+        "rare",
+        "epic",
+        "legendary",
+        "mythic",
+        "boss",
+        "crit",
+        "sell",
+        "fragment",
+        "upgrade_chance",
+        "casino",
+    }
+    for k, v in stats.items():
+        label = STAT_LABELS.get(k, k)
+        if k in pct_keys:
+            parts.append(f"{label}+{int(float(v) * 100)}%")
+        elif k == "cooldown":
+            parts.append(f"{label}-{float(v):g}")
+        else:
+            parts.append(f"{label}+{v}")
+    return " · ".join(parts)
+
+
+def apply_title_rarity_shift(weights: Dict[str, float], stats: dict) -> Dict[str, float]:
+    """칭호의 rare~mythic 가중치를 희귀도 테이블에 반영."""
+    extra = {k: float(stats[k]) for k in ("rare", "epic", "legendary", "mythic") if stats.get(k)}
+    if not extra:
+        return weights
+    w = dict(weights)
+    take = 0.0
+    for rarity, boost in extra.items():
+        if rarity not in w:
+            continue
+        steal = min(w.get("common", 0.5) * boost * 2.5, max(0.0, w.get("common", 0.5) - 0.04))
+        take += steal
+        w[rarity] = w.get(rarity, 0) + steal
+    if take > 0:
+        w["common"] = max(0.04, w.get("common", 0.5) - take)
+    s = sum(w.values()) or 1.0
+    return {k: v / s for k, v in w.items()}
 
 
 def title_unlock_hint(title_id: str) -> str:
@@ -224,18 +359,20 @@ def format_title_acquisition_guide() -> List[str]:
         "**칭호는 어디서 얻나요?**",
         "1. **`!업적`** 에서 각 목표(낚시 횟수, 보스 공격 등)를 달성",
         "2. 업적 달성 시 **보상금 + 칭호 자동 해금** (별도 구매·상점 없음)",
-        "3. **`!칭호 <ID>`** 로 원하는 칭호 장착 · **`!프로필`** 에 표시",
+        "3. **`!칭호 <ID>`** 로 원하는 칭호 장착 — **장착 시 능력치가 실제로 적용**됨",
+        "4. **`!이벤트`** — 황금시간·현상수배·행운복권 등 서버 이벤트",
         "",
-        "**칭호 ↔ 업적 대응표**",
+        "**칭호 ↔ 업적 · 능력치**",
     ]
     for tid, t in TITLES.items():
+        eff = format_title_stats(t.get("stats") or {})
         req = t.get("req")
         if not req:
-            lines.append(f"- `{tid}` **{t['name']}** — 처음부터 사용 가능")
+            lines.append(f"- `{tid}` **{t['name']}** — 기본 · 효과: {eff}")
         else:
             a = ACHIEVEMENTS.get(req, {})
             lines.append(
-                f"- `{tid}` **{t['name']}** ← 업적 **{a.get('name', req)}** ({a.get('desc', '')})"
+                f"- `{tid}` **{t['name']}** ← **{a.get('name', req)}** · 효과: {eff}"
             )
     return lines
 

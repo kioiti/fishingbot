@@ -107,6 +107,8 @@ FISH_TABLE: List[Fish] = [
 ]
 
 
+ROD_MAX_LEVEL = 30
+
 ROD_PASSIVE_DESC: Dict[str, str] = {
     "none": "기본형",
     "rarity_bonus": "희귀도 ↑",
@@ -115,6 +117,7 @@ ROD_PASSIVE_DESC: Dict[str, str] = {
     "crit_bonus": "보스 크리 ↑",
     "sell_bonus": "판매가 ↑",
     "combo": "복합 특성",
+    "boss_slayer": "보스 학살 (극딜)",
 }
 
 
@@ -192,6 +195,44 @@ RODS: Dict[str, dict] = {
         "passive": {"type": "combo", "rarity": 0.22, "boss": 0.20, "crit": 0.08},
         "craft_only": True,
     },
+    "reef": {
+        "name": "🪸 산호초 낚시대",
+        "price": 180_000,
+        "req_level": 9,
+        "passive": {"type": "rarity_bonus", "value": 0.12},
+    },
+    "hunter": {
+        "name": "🎯 심해 사냥꾼 낚시대",
+        "price": 280_000,
+        "req_level": 14,
+        "passive": {"type": "boss_bonus", "value": 0.35},
+    },
+    "starfall": {
+        "name": "🌠 별똥별 낚시대",
+        "price": 420_000,
+        "req_level": 16,
+        "passive": {"type": "combo", "rarity": 0.14, "boss": 0.18, "cooldown": 0.08},
+    },
+    "abyss_king": {
+        "name": "🦑 심해왕 낚시대",
+        "price": 900_000,
+        "req_level": 19,
+        "passive": {"type": "combo", "boss": 0.45, "crit": 0.08, "rarity": 0.08},
+    },
+    "mythic_tide": {
+        "name": "🌊 신화의 조류 낚시대",
+        "price": 2_200_000,
+        "req_level": 23,
+        "passive": {"type": "combo", "rarity": 0.20, "boss": 0.55, "crit": 0.12},
+    },
+    "worldender": {
+        "name": "⚔️ 세계관수 낚시대",
+        "price": 0,
+        "req_level": 24,
+        "passive": {"type": "boss_slayer", "value": 1.25, "crit": 0.20},
+        "drop_only": True,
+        "desc": "보스 전용 극딜. 획득: 관수의 척추 5개 + !각성",
+    },
 }
 
 
@@ -212,6 +253,8 @@ def rod_passive_text(rod_id: str) -> str:
         if "crit" in p:
             parts.append(f"크리+{int(p['crit']*100)}%p")
         return " / ".join(parts) if parts else "복합"
+    if t == "boss_slayer":
+        return f"보스피해 +{int(p.get('value',0)*100)}% / 크리+{int(p.get('crit',0)*100)}%p"
     v = p.get("value", 0)
     return f"{ROD_PASSIVE_DESC.get(t, t)} {int(v*100)}%"
 
@@ -642,7 +685,13 @@ ITEMS: Dict[str, dict] = {
     "abyss_fragment": {
         "name": "🧩 심연의 파편",
         "price": 0,
-        "desc": "100개 모으면 `!파편제작`으로 신화 낚시대 제작",
+        "desc": "100개 → `!파편제작` (심연 군주 낚시대)",
+        "type": "material",
+    },
+    "worldender_spine": {
+        "name": "🦴 관수의 척추",
+        "price": 0,
+        "desc": "5개 + 파편 80개 + 낚시대 +24강 → `!각성` (세계관수 낚시대)",
         "type": "material",
     },
 }
@@ -713,6 +762,8 @@ def clamp(n: float, a: float, b: float) -> float:
 
 
 def get_base_cooldown_seconds(rod_level: int) -> int:
+    if rod_level >= ROD_MAX_LEVEL:
+        return 2
     if rod_level >= 25:
         return 3
     if rod_level >= 20:
@@ -727,6 +778,8 @@ def get_base_cooldown_seconds(rod_level: int) -> int:
 
 
 def get_legendary_bonus_by_level(rod_level: int) -> float:
+    if rod_level >= 28:
+        return 0.105
     if rod_level >= 25:
         return 0.089
     if rod_level >= 20:
@@ -831,7 +884,9 @@ def upgrade_success_rate(rod_level: int) -> float:
         return 0.18
     if rod_level < 25:
         return 0.08
-    return 0.03
+    if rod_level < ROD_MAX_LEVEL:
+        return 0.04
+    return 0.0
 
 
 def upgrade_penalty_check(rod_level: int) -> bool:
