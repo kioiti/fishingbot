@@ -63,6 +63,7 @@ WEATHER_TYPES: Dict[str, dict] = {
     "storm": {"name": "⛈️ 폭풍", "chest_bonus": 0.08, "rarity_bonus": 0.08, "shiny_bonus": 0.015},
     "aurora": {"name": "🌌 오로라", "chest_bonus": 0.03, "rarity_bonus": 0.12, "shiny_bonus": 0.025},
     "blood_moon": {"name": "🌑 블러드문", "chest_bonus": 0.10, "rarity_bonus": 0.15, "shiny_bonus": 0.02},
+    "fog": {"name": "🌫️ 안개", "chest_bonus": 0.01, "rarity_bonus": 0.02, "shiny_bonus": 0.008},
 }
 
 # ── 뽑기 (가챠) ──────────────────────────────────
@@ -122,7 +123,7 @@ def week_key() -> str:
 
 def roll_weather() -> Tuple[str, int]:
     ids = list(WEATHER_TYPES.keys())
-    weights = [20, 25, 25, 12, 10, 8]
+    weights = [18, 22, 24, 12, 9, 7, 8]
     wid = random.choices(ids, weights=weights, k=1)[0]
     until = int(time.time()) + 3600
     return wid, until
@@ -161,38 +162,82 @@ def market_mult_today() -> float:
     return MARKET_DAY_MULT.get(wd, 1.0)
 
 
+def achievement_current_value(profile: dict, ach_id: str, rod_level: int, money: int) -> int:
+    a = ACHIEVEMENTS.get(ach_id)
+    if not a:
+        return 0
+    check = a["check"]
+    if check == "fish_total":
+        return int(profile.get("fish_total", 0))
+    if check == "chest_total":
+        return int(profile.get("chest_total", 0))
+    if check == "shiny_total":
+        return int(profile.get("shiny_total", 0))
+    if check == "legendary_total":
+        return int(profile.get("legendary_total", 0))
+    if check == "mythic_total":
+        return int(profile.get("mythic_total", 0))
+    if check == "rod_level":
+        return rod_level
+    if check == "boss_hits":
+        return int(profile.get("boss_hits", 0))
+    if check == "casino_wins":
+        return int(profile.get("casino_wins", 0))
+    if check == "duel_wins":
+        return int(profile.get("duel_wins", 0))
+    if check == "money":
+        return money
+    if check == "gacha_total":
+        return int(profile.get("gacha_total", 0))
+    return 0
+
+
 def achievement_progress(profile: dict, ach_id: str, rod_level: int, money: int) -> bool:
-    if ach_id in profile.get("achievements", []):
+    ach_list = profile.get("achievements", [])
+    if not isinstance(ach_list, list):
+        ach_list = []
+    if ach_id in ach_list:
         return False
     a = ACHIEVEMENTS.get(ach_id)
     if not a:
         return False
-    check = a["check"]
-    target = int(a["target"])
-    val = 0
-    if check == "fish_total":
-        val = int(profile.get("fish_total", 0))
-    elif check == "chest_total":
-        val = int(profile.get("chest_total", 0))
-    elif check == "shiny_total":
-        val = int(profile.get("shiny_total", 0))
-    elif check == "legendary_total":
-        val = int(profile.get("legendary_total", 0))
-    elif check == "mythic_total":
-        val = int(profile.get("mythic_total", 0))
-    elif check == "rod_level":
-        val = rod_level
-    elif check == "boss_hits":
-        val = int(profile.get("boss_hits", 0))
-    elif check == "casino_wins":
-        val = int(profile.get("casino_wins", 0))
-    elif check == "duel_wins":
-        val = int(profile.get("duel_wins", 0))
-    elif check == "money":
-        val = money
-    elif check == "gacha_total":
-        val = int(profile.get("gacha_total", 0))
-    return val >= target
+    return achievement_current_value(profile, ach_id, rod_level, money) >= int(a["target"])
+
+
+def title_unlock_hint(title_id: str) -> str:
+    t = TITLES.get(title_id, {})
+    req = t.get("req")
+    if not req:
+        return "처음부터 사용 · `!칭호 title_rookie`"
+    a = ACHIEVEMENTS.get(req)
+    if not a:
+        return f"`!업적`에서 업적 `{req}` 달성"
+    return (
+        f"`!업적` **{a['name']}** 달성 시 해금 — {a['desc']} "
+        f"(업적 보상 {int(a['reward']):,}원)"
+    )
+
+
+def format_title_acquisition_guide() -> List[str]:
+    """칭호 획득 경로 안내 (상점 없음, 업적 연동)."""
+    lines = [
+        "**칭호는 어디서 얻나요?**",
+        "1. **`!업적`** 에서 각 목표(낚시 횟수, 보스 공격 등)를 달성",
+        "2. 업적 달성 시 **보상금 + 칭호 자동 해금** (별도 구매·상점 없음)",
+        "3. **`!칭호 <ID>`** 로 원하는 칭호 장착 · **`!프로필`** 에 표시",
+        "",
+        "**칭호 ↔ 업적 대응표**",
+    ]
+    for tid, t in TITLES.items():
+        req = t.get("req")
+        if not req:
+            lines.append(f"- `{tid}` **{t['name']}** — 처음부터 사용 가능")
+        else:
+            a = ACHIEVEMENTS.get(req, {})
+            lines.append(
+                f"- `{tid}` **{t['name']}** ← 업적 **{a.get('name', req)}** ({a.get('desc', '')})"
+            )
+    return lines
 
 
 def unlocked_titles(profile: dict) -> List[str]:

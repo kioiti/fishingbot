@@ -101,6 +101,9 @@ FISH_TABLE: List[Fish] = [
     Fish("chaos_shark", "혼돈의 상어", "mythic", 180000),
     Fish("eternal_coral", "영원의 산호", "mythic", 220000),
     Fish("genesis_fish", "태초의 물고기", "mythic", 350000),
+    Fish("spectral_eel", "유령 장어", "epic", 3400),
+    Fish("phantom_koi", "망령 잉어", "legendary", 40000),
+    Fish("wraith_shark", "원혼 상어", "mythic", 290000),
 ]
 
 
@@ -181,6 +184,13 @@ RODS: Dict[str, dict] = {
         "price": 1500000,
         "req_level": 22,
         "passive": {"type": "combo", "boss": 0.30, "crit": 0.10, "rarity": 0.12},
+    },
+    "sovereign": {
+        "name": "👑 심연 군주 낚시대",
+        "price": 0,
+        "req_level": 20,
+        "passive": {"type": "combo", "rarity": 0.22, "boss": 0.20, "crit": 0.08},
+        "craft_only": True,
     },
 }
 
@@ -338,7 +348,10 @@ CHESTS: Dict[str, dict] = {
 
 
 def _roll_chest_tier(rod_level: int, map_id: str) -> str:
-    map_bonus = {"river": 0, "ocean": 1, "abyss": 2, "cosmic": 3}.get(map_id, 0)
+    map_bonus = {
+        "river": 0, "ocean": 1, "abyss": 2, "cosmic": 3,
+        "volcano": 2, "glacier": 1, "lab": 2,
+    }.get(map_id, 0)
     tiers: List[Tuple[str, int]] = [
         ("chest_wood", 42),
         ("chest_silver", 30),
@@ -372,15 +385,22 @@ def roll_fishing_catch(
     active_bait: str | None = None,
     extra_chest_chance: float = 0.0,
     extra_rarity_boost: float = 0.0,
+    fish_picker=None,
+    weight_adjuster=None,
 ) -> Tuple[str, object]:
     """반환: ('fish', Fish) 또는 ('chest', chest_id)"""
-    map_bonus = {"river": 0.0, "ocean": 0.02, "abyss": 0.05, "cosmic": 0.08}.get(map_id, 0.0)
+    map_bonus = {
+        "river": 0.0, "ocean": 0.02, "abyss": 0.05, "cosmic": 0.08,
+        "volcano": 0.04, "glacier": 0.03, "lab": 0.06,
+    }.get(map_id, 0.0)
     chest_chance = 0.16 + min(0.12, rod_level * 0.004) + map_bonus + float(extra_chest_chance)
 
     if random.random() < chest_chance:
         return "chest", _roll_chest_tier(rod_level, map_id)
 
     weights = get_rarity_weights(rod_level, rod_type, map_id, active_bait)
+    if weight_adjuster:
+        weights = weight_adjuster(weights)
     if extra_rarity_boost > 0:
         take = clamp(weights["common"] * extra_rarity_boost, 0.0, weights["common"] - 0.05)
         weights = dict(weights)
@@ -393,6 +413,8 @@ def roll_fishing_catch(
         for k in weights:
             weights[k] /= s
     rarity = choose_rarity(weights)
+    if fish_picker:
+        return "fish", fish_picker(rarity)
     return "fish", choose_fish(rarity)
 
 
@@ -511,7 +533,46 @@ MAPS: Dict[str, dict] = {
             "legendary": 0.19,
             "mythic": 0.08,
         }
-    }
+    },
+    "volcano": {
+        "name": "🌋 화산 지대",
+        "req_level": 8,
+        "fee": 25000,
+        "cooldown_multiplier": 1.15,
+        "rarity_weights": {
+            "common": 0.45,
+            "rare": 0.32,
+            "epic": 0.17,
+            "legendary": 0.05,
+            "mythic": 0.01,
+        },
+    },
+    "glacier": {
+        "name": "❄️ 빙하 호수",
+        "req_level": 7,
+        "fee": 20000,
+        "cooldown_multiplier": 1.1,
+        "rarity_weights": {
+            "common": 0.50,
+            "rare": 0.30,
+            "epic": 0.15,
+            "legendary": 0.04,
+            "mythic": 0.01,
+        },
+    },
+    "lab": {
+        "name": "🧪 버려진 연구소",
+        "req_level": 12,
+        "fee": 50000,
+        "cooldown_multiplier": 1.25,
+        "rarity_weights": {
+            "common": 0.30,
+            "rare": 0.35,
+            "epic": 0.22,
+            "legendary": 0.10,
+            "mythic": 0.03,
+        },
+    },
 }
 
 
@@ -577,6 +638,12 @@ ITEMS: Dict[str, dict] = {
         "price": 800000,
         "desc": "신화급 재료. 획득 확률 1~3%.",
         "type": "treasure",
+    },
+    "abyss_fragment": {
+        "name": "🧩 심연의 파편",
+        "price": 0,
+        "desc": "100개 모으면 `!파편제작`으로 신화 낚시대 제작",
+        "type": "material",
     },
 }
 

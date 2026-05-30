@@ -73,9 +73,10 @@ STOCKS: Dict[str, dict] = {
     },
 }
 
-STOCK_TICK_SECONDS = 120
+STOCK_TICK_SECONDS = 600  # 정확히 10분(600초)마다 시세 1회 변동
+STOCK_TICK_CHECK_SECONDS = 60  # 루프는 1분마다 확인, last_tick 기준으로 10분 경과 시만 틱
 MAX_TRADE_QTY = 5_000
-NEWS_HOURS_KST = (11, 20)  # 하루 2회 (KST 11시, 20시)
+NEWS_HOURS_KST = (11, 17, 22)  # 하루 3회 (KST)
 
 # 속보에 등장하는 가상 파트너/기관
 NEWS_PARTNERS: List[str] = [
@@ -150,8 +151,22 @@ def price_bounds(stock_id: str, price: int) -> int:
     return max(lo, min(hi, int(price)))
 
 
+def seconds_until_next_tick(last_tick: int, now: int | None = None) -> int:
+    """다음 시세 변동까지 남은 초 (0이면 곧 또는 직후 변동)."""
+    now = int(now if now is not None else time.time())
+    elapsed = now - int(last_tick or 0)
+    if elapsed >= STOCK_TICK_SECONDS:
+        return 0
+    return STOCK_TICK_SECONDS - elapsed
+
+
+def should_tick_market(last_tick: int, now: int | None = None) -> bool:
+    now = int(now if now is not None else time.time())
+    return now - int(last_tick or 0) >= STOCK_TICK_SECONDS
+
+
 def tick_market(prices: dict, prev: dict) -> Tuple[dict, dict]:
-    """한 틱 시세 변동. 반환: (new_prices, new_prev)"""
+    """한 틱 시세 변동 (10분 주기당 1회). 반환: (new_prices, new_prev)"""
     new_prices = dict(prices)
     new_prev = dict(prices)
     for sid in STOCKS:
