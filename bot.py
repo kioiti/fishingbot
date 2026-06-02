@@ -138,7 +138,6 @@ from game_stocks import (
     STOCKS,
     STOCK_TICK_SECONDS,
     STOCK_TICK_CHECK_SECONDS,
-    MAX_TRADE_QTY,
     default_market,
     format_change,
     resolve_stock,
@@ -2490,6 +2489,62 @@ async def _stock_sell_all(ctx: commands.Context) -> None:
         f"{body}\n"
         f"\n💰 매도 합계: **{_fmt_money(total_payout)}**{summary_pl}\n"
         f"잔액: **{_fmt_money(bal)}**",
+        mention_author=False,
+    )
+
+
+async def _stock_buy_all(ctx: commands.Context) -> None:
+    market = await _get_stock_market()
+    money = await get_money(ctx.author.id)
+    if money <= 0:
+        await ctx.reply("매수할 돈이 없어.", mention_author=False)
+        return
+
+    ids = [sid for sid in STOCKS.keys() if sid in (market.get("prices") or {})]
+    if not ids:
+        await ctx.reply("매수 가능한 종목이 없어. 잠시 후 다시 시도해줘.", mention_author=False)
+        return
+
+    per_budget = money // len(ids)
+    if per_budget <= 0:
+        await ctx.reply("잔액이 너무 적어서 전체 분산 매수가 불가능해.", mention_author=False)
+        return
+
+    plan: list[tuple[str, int, int, int]] = []  # sid, price, qty, spend
+    spent = 0
+    for sid in ids:
+        price, _ = _stock_price(market, sid)
+        qty = int(per_budget // max(1, price))
+        if qty <= 0:
+            continue
+        spend = qty * price
+        plan.append((sid, price, qty, spend))
+        spent += spend
+
+    if not plan or spent <= 0:
+        await ctx.reply(
+            "현재 시세 기준으로는 잔액이 부족해 전체 분산 매수가 안 돼.",
+            mention_author=False,
+        )
+        return
+
+    await add_money(ctx.author.id, -spent)
+    port = await _get_user_portfolio(ctx.author.id)
+    lines = []
+    for sid, price, qty, spend in plan:
+        _portfolio_add_buy(port, sid, qty, price)
+        s = STOCKS[sid]
+        lines.append(f"- **{s['company']}** {qty}주 @ {price:,}원 = {_fmt_money(spend)}")
+    await _set_user_portfolio(ctx.author.id, port)
+
+    bal = await get_money(ctx.author.id)
+    body = "\n".join(lines[:18])
+    if len(lines) > 18:
+        body += f"\n... 외 {len(lines) - 18}종목"
+    await ctx.reply(
+        f"✅ **전체 종목 분산 매수 완료** ({len(plan)}종목)\n"
+        f"{body}\n"
+        f"\n💸 사용 금액: **{_fmt_money(spent)}** / 잔액: **{_fmt_money(bal)}**",
         mention_author=False,
     )
 
@@ -5940,10 +5995,13 @@ async def stock_quote_cmd(ctx: commands.Context, *, query: str | None = None):
 async def stock_buy_cmd(ctx: commands.Context, query: str | None = None, qty_raw: str | None = None):
     if not _channel_allowed(ctx):
         return
+    if query and query.strip().lower() in ("all", "전체", "전부", "일괄", "풀매수"):
+        await _stock_buy_all(ctx)
+        return
     if not query or not qty_raw:
         await ctx.reply(
             "사용법: `!주식매수 <종목> <수량>`\n"
-            "예: `!주식매수 머래제약 10` · `!주식매수 밈콩 3`",
+            "예: `!주식매수 머래제약 10` · `!주식매수 밈콩 3` · `!주식매수 all`",
             mention_author=False,
         )
         return
@@ -5955,8 +6013,8 @@ async def stock_buy_cmd(ctx: commands.Context, query: str | None = None, qty_raw
         await ctx.reply("수량은 숫자로 입력해줘.", mention_author=False)
         return
     qty = int(qty_raw)
-    if qty <= 0 or qty > MAX_TRADE_QTY:
-        await ctx.reply(f"수량은 1~{MAX_TRADE_QTY}주까지 가능해.", mention_author=False)
+    if qty <= 0:
+        await ctx.reply("수량은 1주 이상으로 입력해줘.", mention_author=False)
         return
 
     market = await _get_stock_market()
@@ -6040,8 +6098,8 @@ async def stock_sell_cmd(ctx: commands.Context, query: str | None = None, qty_ra
         await ctx.reply("수량은 숫자 또는 `all`", mention_author=False)
         return
 
-    if qty <= 0 or qty > MAX_TRADE_QTY:
-        await ctx.reply(f"수량은 1~{MAX_TRADE_QTY}주 (보유 {have}주)", mention_author=False)
+    if qty <= 0:
+        await ctx.reply(f"수량은 1주 이상으로 입력해줘. (보유 {have}주)", mention_author=False)
         return
     if qty > have:
         await ctx.reply(f"보유 주식이 부족해! (보유 **{have}주**)", mention_author=False)
