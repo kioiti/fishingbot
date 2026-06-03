@@ -4256,40 +4256,100 @@ async def fish_rank_cmd(ctx: commands.Context):
     await ctx.reply("\n".join(lines) if top else "아직 데이터 없음", mention_author=False)
 
 
+def generate_rocket_crash():
+    r = random.random()
+
+    # 70% -> 1.5 ~ 3배
+    if r < 0.70:
+        return round(random.uniform(1.5, 3.0), 2)
+
+    # 20% -> 3 ~ 10배
+    elif r < 0.90:
+        return round(random.uniform(3.0, 10.0), 2)
+
+    # 8% -> 10 ~ 25배
+    elif r < 0.98:
+        return round(random.uniform(10.0, 25.0), 2)
+
+    # 1.5% -> 25 ~ 50배
+    elif r < 0.995:
+        return round(random.uniform(25.0, 50.0), 2)
+
+    # 0.5% -> 50 ~ 100배
+    else:
+        return round(random.uniform(50.0, 100.0), 2)
+
+
 @bot.command(name="로켓")
 async def rocket_cmd(ctx: commands.Context, bet_raw: str | None = None, target_raw: str | None = None):
     if not _channel_allowed(ctx):
         return
+
     bet = _parse_bet(bet_raw)
+
     if bet is None or not target_raw:
-        await ctx.reply("사용법: `!로켓 <베팅> <목표배율 2~10>` — 터지기 전에 맞추면 성공", mention_author=False)
+        await ctx.reply(
+            "사용법: `!로켓 <베팅> <목표배율 2~100>` — 터지기 전에 맞추면 성공",
+            mention_author=False
+        )
         return
+
     try:
         target = float(target_raw)
     except Exception:
-        await ctx.reply("배율은 2~10 사이 숫자", mention_author=False)
+        await ctx.reply("배율은 2~100 사이 숫자", mention_author=False)
         return
-    if target < 2 or target > 10:
-        await ctx.reply("배율은 2~10", mention_author=False)
+
+    if target < 2 or target > 100:
+        await ctx.reply("배율은 2~100", mention_author=False)
         return
+
     ok, err = await _casino_guard(ctx, bet)
+
     if not ok:
         if err:
             await ctx.reply(err, mention_author=False)
         return
+
     await add_money(ctx.author.id, -bet)
-    crash = round(random.uniform(1.5, 10.5), 2)
+
+    # 가중치 적용된 로켓 배율
+    crash = generate_rocket_crash()
+
     fee = await _casino_fee(ctx.author.id, 0.01)
+
     if target <= crash:
         payout = int(bet * target * (1 - fee))
         await add_money(ctx.author.id, payout)
+
         net = payout - bet
+
         await _casino_bump(ctx.author.id, bet, net, "로켓")
-        await ctx.reply(f"🚀 로켓 **{crash}x**에서 수익 인출! 목표 {target}x → **+{_fmt_money(net)}**", mention_author=False)
+
+        msg = (
+            f"🚀 로켓 **{crash}x**에서 수익 인출!\n"
+            f"🎯 목표: {target}x\n"
+            f"💰 수익: **+{_fmt_money(net)}**"
+        )
+
+        # 고배율 성공 특별 메시지
+        if target >= 50:
+            msg += "\n🔥 전설적인 대박!"
+        elif target >= 25:
+            msg += "\n⚡ 초고배율 성공!"
+        elif target >= 10:
+            msg += "\n✨ 고배율 성공!"
+
+        await ctx.reply(msg, mention_author=False)
+
     else:
         await _casino_bump(ctx.author.id, bet, -bet, "로켓")
-        await ctx.reply(f"💥 로켓 **{crash}x**에서 터짐! 목표 {target}x 실패", mention_author=False)
 
+        await ctx.reply(
+            f"💥 로켓 **{crash}x**에서 터짐!\n"
+            f"🎯 목표: {target}x 실패",
+            mention_author=False
+        )
 
 async def _risk_game_settle(
     ctx: commands.Context, bet: int, roll: dict, game_name: str, intro_lines: list[str] | None = None
