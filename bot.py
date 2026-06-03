@@ -1087,7 +1087,7 @@ async def _casino_guard(ctx: commands.Context, bet: int) -> tuple[bool, str | No
         return False, None
 
     CASINO_CD_SECONDS = 5
-    CASINO_MAX_BET = 500_000
+    CASINO_MAX_BET = 5_000_000
 
     if bet <= 0:
         return False, "베팅은 1원 이상만 가능해."
@@ -1715,7 +1715,7 @@ HELP_TOPICS: Dict[str, list[str]] = {
         "💡 자세히: `!가이드` · 카테고리: `!도움말 낚시`",
     ],
     "카지노": [
-        "**🎲 도박** (베팅 상한 50만)",
+        "**🎲 도박** (베팅  50만)",
         "`!슬롯` `!슬롯10` `!잭팟` `!잭팟랭킹` `!주화`",
         "`!로켓 <베팅> <배율2~10>` — 로켓 (쉬움)",
         "`!심연 <베팅>` — 극악확률 초고배당 (`!심연확률`)",
