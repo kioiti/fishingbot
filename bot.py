@@ -1086,8 +1086,8 @@ async def _casino_guard(ctx: commands.Context, bet: int) -> tuple[bool, str | No
     if not _channel_allowed(ctx):
         return False, None
 
-    CASINO_CD_SECONDS = 5
-    CASINO_MAX_BET = 5_000_000
+    CASINO_CD_SECONDS = 3
+    CASINO_MAX_BET = 10_000_000
 
     if bet <= 0:
         return False, "베팅은 1원 이상만 가능해."
