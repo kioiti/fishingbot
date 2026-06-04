@@ -4255,27 +4255,26 @@ async def fish_rank_cmd(ctx: commands.Context):
         lines.append(f"{i}. **{name}** — {cnt}회")
     await ctx.reply("\n".join(lines) if top else "아직 데이터 없음", mention_author=False)
 
-
 def generate_rocket_crash():
     r = random.random()
 
-    # 70% -> 1.5 ~ 3배
-    if r < 0.70:
+    # 60% -> 1.5 ~ 3배
+    if r < 0.60:
         return round(random.uniform(1.5, 3.0), 2)
 
-    # 20% -> 3 ~ 10배
-    elif r < 0.90:
+    # 25% -> 3 ~ 10배
+    elif r < 0.85:
         return round(random.uniform(3.0, 10.0), 2)
 
-    # 8% -> 10 ~ 25배
-    elif r < 0.98:
+    # 10% -> 10 ~ 25배
+    elif r < 0.95:
         return round(random.uniform(10.0, 25.0), 2)
 
-    # 1.5% -> 25 ~ 50배
-    elif r < 0.995:
+    # 4% -> 25 ~ 50배
+    elif r < 0.99:
         return round(random.uniform(25.0, 50.0), 2)
 
-    # 0.5% -> 50 ~ 100배
+    # 1% -> 50 ~ 100배
     else:
         return round(random.uniform(50.0, 100.0), 2)
 
